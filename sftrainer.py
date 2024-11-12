@@ -59,8 +59,7 @@ class QuantizedLlamaModel(torch.nn.Module):
         for layer in self.base_model.children():
             if isinstance(layer, torch.nn.Linear):
                 layer.weight.data = self.sf8_quantizer.tensor_quantize(layer.weight.data)
-            x = layer(x)
-            x = self.sf8_quantizer.tensor_quantize(x)
+            x = self.sf8_quantizer.tensor_quantize(layer(x))
         return x
 
 from transformers import LlamaForCausalLM, PreTrainedTokenizerFast
