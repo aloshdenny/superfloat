@@ -51,8 +51,7 @@ class QuantizedLlamaModel(torch.nn.Module):
         for param in self.base_model.parameters():
             def hook(grad, param=param):
                 _, out_of_range = self.sf8_quantizer.tensor_quantize(param)
-                grad = grad * out_of_range.to(grad.dtype)  # Mask to allow gradients only on out-of-range params
-                return grad
+                return (grad * out_of_range.to(grad.dtype))  # Mask to allow gradients only on out-of-range params
             param.register_hook(hook)
 
     def forward(self, x):
@@ -60,8 +59,7 @@ class QuantizedLlamaModel(torch.nn.Module):
         for layer in self.base_model.children():
             if isinstance(layer, torch.nn.Linear):
                 layer.weight.data, _ = self.sf8_quantizer.tensor_quantize(layer.weight.data)
-            x = layer(x)
-            x, _ = self.sf8_quantizer.tensor_quantize(x)
+            x, _ = self.sf8_quantizer.tensor_quantize(layer(x))
         return x
 
 # Initialize model and tokenizer
@@ -110,7 +108,7 @@ def collate_fn(batch):
 
 # Prepare tokenized dataset and dataloader
 tokenized_dataset = prepare_dataset(tokenizer)
-train_dataloader = DataLoader(tokenized_dataset, batch_size=1, shuffle=True, collate_fn=collate_fn)
+train_dataloader = DataLoader(tokenized_dataset, batch_size=2, shuffle=True, collate_fn=collate_fn)
 
 # Optimizer and Loss
 optimizer = torch.optim.Adam(quantized.parameters(), lr=1e-5)
