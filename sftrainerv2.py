@@ -86,7 +86,7 @@ torch.cuda.empty_cache()
 gc.collect()
 
 # Prepare Dataset
-def prepare_dataset(tokenizer, max_length=1024):
+def prepare_dataset(tokenizer, max_length=512):
     # dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
     dataset = Dataset.from_parquet('train-00000-of-01650-f70471ee3deb09c0.parquet')
     def tokenize_function(examples):
