@@ -43,12 +43,12 @@ class Superfloat:
         return decoded_tensor
 
 # Initialize Superfloat quantizer for clamping
-sf8 = Superfloat(8)
+sf = Superfloat(8)
 
 # Load model in bfloat16 directly for inference
 model_name = "meta-llama/Llama-3.2-1B"
 model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
-model.load_state_dict(torch.load("sf8_trained_epoch3", map_location=device))
+model.load_state_dict(torch.load("sf{sf.bits}_trained_epoch3", map_location=device))
 model = model.to(torch.bfloat16).to(device)
 model.eval()  # Ensure model is in inference mode
 

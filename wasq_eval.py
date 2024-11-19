@@ -52,8 +52,8 @@ class Superfloat:
         decoded_tensor = self.decode(encoded_tensor)
         return decoded_tensor
 
-# Initialize Superfloat quantizer for clamping
-sf8 = Superfloat(8)
+# Initialize Superfloat quantizer for sf{sf.bits}amping
+sf = Superfloat(8)
 
 model_name = "meta-llama/Llama-3.2-1B"
 
@@ -105,13 +105,13 @@ def calculate_perplexity(model, tokenizer, prompt):
 
 # Model paths
 models = [
-    "sf8_trained_epoch1",
-    "sf8_trained_epoch2",
-    "sf8_trained_epoch3",
-    "sf8_pile_epoch1",
-    "sf8_pile_epoch2",
-    "sf8_pile_epoch3",
-    "sf8_pile_epoch1_opt"
+    "sf{sf.bits}_vanilla",
+    "sf{sf.bits}_pile_epoch1_fpm",
+    "sf{sf.bits}_pile_epoch2_fpm",
+    "sf{sf.bits}_pile_epoch3_fpm",
+    "sf{sf.bits}_pile_epoch1_opt",
+    "sf{sf.bits}_pile_epoch2_opt",
+    "sf{sf.bits}_pile_epoch3_opt"
 ]
 
 # Function to evaluate perplexity for a list of models and prompts
