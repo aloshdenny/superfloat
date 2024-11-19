@@ -25,26 +25,18 @@ class Superfloat:
         self.float_type = self.CASTING_TABLE[bits]  # Get float type based on bitwidth
 
     def encode(self, value: torch.Tensor) -> torch.Tensor:
-        """Encodes a tensor of values into the superfloat format with optimized operations."""
-        # Clip tensor values to the valid range for SFx
+        """Encodes a tensor of values into the superfloat format."""
         clipped_value = torch.clamp(value, min=-self.max_val, max=self.max_val)
-
-        # Calculate mantissa representation element-wise
         mantissa = (torch.abs(clipped_value) * (2**self.mantissa_bits - 1) / self.max_val).floor().to(torch.int32)
-
-        # Create the superfloat representation (1 bit for sign and mantissa bits)
         sign = (clipped_value < 0).to(torch.int32)
         return (mantissa | (sign << self.mantissa_bits)).to(torch.int32)
 
     def decode(self, encoded_value: torch.Tensor) -> torch.Tensor:
         """Decodes a tensor of encoded superfloat values to regular floats."""
-        # Extract mantissa and sign from the encoded superfloat
         mantissa = encoded_value & ((1 << self.mantissa_bits) - 1)
         sign = (encoded_value >> self.mantissa_bits) & 1
-
-        # Calculate the decoded float using the mantissa and max_val
-        decoded_value = (mantissa.to(torch.bfloat16) / (2**self.mantissa_bits - 1)) * self.max_val
-        return decoded_value * (2 * sign - 1)  # Apply the sign
+        decoded_value = (mantissa.to(self.float_type) / (2**self.mantissa_bits - 1)) * self.max_val
+        return decoded_value * (2 * sign - 1)
 
     def tensor_quantize(self, tensor: torch.Tensor) -> torch.Tensor:
         """Quantizes a tensor to the superfloat format, preserving the tensor's shape."""
@@ -87,7 +79,7 @@ print(f"Using device: {device}")
 # Initialize model and tokenizer
 model_name = "meta-llama/Llama-3.2-1B"
 model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
-model = model.to(torch.bfloat16).to(device)
+model = model.to(sf.float_type).to(device)
 
 tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name, cache_dir='./', token='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')
 
@@ -99,6 +91,19 @@ def quantize_model(model, sf_type):
         quantized_param = sf_type.tensor_quantize(param)
         param.data = quantized_param.data
     return model
+
+# Checker function to verify quantization
+def check_model_quantization(model, sf_type):
+    all_parameters_valid = True
+    for name, param in model.named_parameters():
+        param_data = param.data
+        if param_data.dtype != sf_type.float_type:
+            print(f"Parameter {name} is not in {sf_type.float_type} format!")
+            all_parameters_valid = False
+        if not torch.all((param_data >= -sf_type.max_val) & (param_data <= sf_type.max_val)):
+            print(f"Parameter {name} has values outside the SF{sf_type.bits} range!")
+            all_parameters_valid = False
+    return all_parameters_valid
 
 quantized = quantize_model(model, sf)
 

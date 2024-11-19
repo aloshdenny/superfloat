@@ -31,22 +31,17 @@ class Superfloat:
         self.float_type = self.CASTING_TABLE[bits]  # Get float type based on bitwidth
 
     def encode(self, value: torch.Tensor) -> torch.Tensor:
-        """Encodes a tensor of values into the superfloat format with optimized operations."""
+        """Encodes a tensor of values into the superfloat format."""
         clipped_value = torch.clamp(value, min=-self.max_val, max=self.max_val)
-        out_of_range = (value.abs() > self.max_val)
-
-        # Calculate mantissa representation element-wise
         mantissa = (torch.abs(clipped_value) * (2**self.mantissa_bits - 1) / self.max_val).floor().to(torch.int32)
-
-        # Create the superfloat representation (1 bit for sign and mantissa bits)
         sign = (clipped_value < 0).to(torch.int32)
-        return (mantissa | (sign << self.mantissa_bits)).to(torch.int32), out_of_range
+        return (mantissa | (sign << self.mantissa_bits)).to(torch.int32)
 
     def decode(self, encoded_value: torch.Tensor) -> torch.Tensor:
         """Decodes a tensor of encoded superfloat values to regular floats."""
         mantissa = encoded_value & ((1 << self.mantissa_bits) - 1)
         sign = (encoded_value >> self.mantissa_bits) & 1
-        decoded_value = (mantissa.to(torch.float16) / (2**self.mantissa_bits - 1)) * self.max_val
+        decoded_value = (mantissa.to(self.float_type) / (2**self.mantissa_bits - 1)) * self.max_val
         return decoded_value * (2 * sign - 1)
 
     def tensor_quantize(self, tensor: torch.Tensor) -> torch.Tensor:
@@ -87,7 +82,7 @@ print(f"Using device: {device}")
 
 model_name = "meta-llama/Llama-3.2-1B"
 model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
-model = model.to(torch.float16).to(device)
+model = model.to(sf.float_type).to(device)
 
 tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name, cache_dir='./', token='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')
 tokenizer.pad_token = tokenizer.eos_token
