@@ -86,9 +86,9 @@ print("Checking model quantization...")
 is_valid = check_model_quantization(quantized_model, sf)
 
 if is_valid:
-    print("All parameters are in {sf.float_type} format and within the SF{sf.bits} range.")
+    print(f"All parameters are in {sf.float_type} format and within the SF{sf.bits} range.")
     # Save quantized model
-    save_path = "sf{sf.bits}_vanilla.pt"
+    save_path = f"sf{sf.bits}_vanilla"
     torch.save(quantized_model.state_dict(), save_path)
     print(f"Quantized model saved to {save_path}")
 else:
