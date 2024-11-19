@@ -36,7 +36,7 @@ class Superfloat:
         """Decodes a tensor of encoded superfloat values to regular floats."""
         mantissa = encoded_value & ((1 << self.mantissa_bits) - 1)
         sign = (encoded_value >> self.mantissa_bits) & 1
-        decoded_value = (mantissa.to(torch.bfloat16) / (2**self.mantissa_bits - 1)) * self.max_val
+        decoded_value = (mantissa.to(self.float_type) / (2**self.mantissa_bits - 1)) * self.max_val
         return decoded_value * (2 * sign - 1)
 
     def tensor_quantize(self, tensor: torch.Tensor) -> torch.Tensor:
@@ -61,11 +61,11 @@ def check_model_quantization(model, sf_type):
     all_parameters_valid = True
     for name, param in model.named_parameters():
         param_data = param.data
-        if param_data.dtype != torch.bfloat16:
-            print(f"Parameter {name} is not in bfloat16 format!")
+        if param_data.dtype != sf_type.float_type:
+            print(f"Parameter {name} is not in {sf_type.float_type} format!")
             all_parameters_valid = False
         if not torch.all((param_data >= -sf_type.max_val) & (param_data <= sf_type.max_val)):
-            print(f"Parameter {name} has values outside the SF8 range!")
+            print(f"Parameter {name} has values outside the SF{sf_type.bits} range!")
             all_parameters_valid = False
     return all_parameters_valid
 
@@ -75,7 +75,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
-model = model.to(torch.bfloat16).to(device)
+model = model.to(sf.float_type).to(device)  # Ensure model uses the correct float type
 
 # Quantize parameters
 print("Quantizing model parameters...")
