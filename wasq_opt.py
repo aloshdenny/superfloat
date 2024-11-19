@@ -33,9 +33,10 @@ class Superfloat:
     def encode(self, value: torch.Tensor) -> torch.Tensor:
         """Encodes a tensor of values into the superfloat format."""
         clipped_value = torch.clamp(value, min=-self.max_val, max=self.max_val)
+        out_of_range = (value.abs() > self.max_val)
         mantissa = (torch.abs(clipped_value) * (2**self.mantissa_bits - 1) / self.max_val).floor().to(torch.int32)
         sign = (clipped_value < 0).to(torch.int32)
-        return (mantissa | (sign << self.mantissa_bits)).to(torch.int32)
+        return (mantissa | (sign << self.mantissa_bits)).to(torch.int32), out_of_range
 
     def decode(self, encoded_value: torch.Tensor) -> torch.Tensor:
         """Decodes a tensor of encoded superfloat values to regular floats."""
