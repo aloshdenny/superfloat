@@ -105,14 +105,14 @@ quantized = quantize_model(model, sf)
 import os
 import re
 
-def load_checkpoint(quantized_model, sf_bits, suffix="opt", device="cuda"):
+def load_checkpoint(quantized_model, sf_bits, suffix="fpm", device="cuda"):
     """
     Load the latest checkpoint based on the provided Superfloat bitwidth and filename suffix.
     
     Args:
         quantized_model: The model to load the checkpoint into.
         sf_bits: Bitwidth of the Superfloat format (e.g., 11).
-        suffix: The suffix of the filename (default: 'opt').
+        suffix: The suffix of the filename (default: 'fpm').
         device: Device to load the model onto ('cuda' or 'cpu').
 
     Returns:
@@ -145,7 +145,7 @@ def load_checkpoint(quantized_model, sf_bits, suffix="opt", device="cuda"):
     return quantized_model, latest_epoch
 
 # Usage
-quantized, last_epoch = load_checkpoint(quantized, sf8.bits, suffix="opt", device=device)
+quantized, last_epoch = load_checkpoint(quantized, sf.bits, suffix="fpm", device=device)
 print(f"Resuming training from epoch {last_epoch + 1}.")
 
 del model
