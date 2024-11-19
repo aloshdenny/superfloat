@@ -11,11 +11,11 @@ class Superfloat:
         11: torch.float16,
         10: torch.float16,
         9: torch.float16,
-        8: torch.float16,
-        7: torch.float16,
-        6: torch.float16,
-        5: torch.float16,
-        4: torch.float16,
+        8: torch.bfloat16,
+        7: torch.bfloat16,
+        6: torch.bfloat16,
+        5: torch.bfloat16,
+        4: torch.bfloat16,
     }
 
     def __init__(self, bits: int):
