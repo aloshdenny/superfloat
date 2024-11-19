@@ -105,12 +105,10 @@ def check_model_quantization(model, sf_type):
             all_parameters_valid = False
     return all_parameters_valid
 
-quantized = quantize_model(model, sf)
-
 import os
 import re
 
-def load_checkpoint(quantized_model, sf_bits, suffix="fpm", device="cuda"):
+def load_checkpoint(model, sf_bits, suffix="fpm", device="cuda"):
     """
     Load the latest checkpoint based on the provided Superfloat bitwidth and filename suffix.
     
@@ -133,7 +131,7 @@ def load_checkpoint(quantized_model, sf_bits, suffix="fpm", device="cuda"):
 
     if not checkpoint_files:
         print(f"No checkpoints found for sf{sf_bits} with suffix '{suffix}'.")
-        return quantized_model, 0
+        return quantize_model(model, sf), 0
 
     # Extract epoch numbers and sort by latest epoch
     epochs_and_files = [
@@ -144,13 +142,13 @@ def load_checkpoint(quantized_model, sf_bits, suffix="fpm", device="cuda"):
     # Load the latest checkpoint
     print(f"Loading checkpoint: {latest_checkpoint}")
     checkpoint = torch.load(latest_checkpoint, map_location=device)
-    quantized_model.load_state_dict(checkpoint)
-    quantized_model.to(device)
+    model.load_state_dict(checkpoint)
+    model.to(device)
 
-    return quantized_model, latest_epoch
+    return model, latest_epoch
 
 # Usage
-quantized, last_epoch = load_checkpoint(quantized, sf.bits, suffix="fpm", device=device)
+quantized, last_epoch = load_checkpoint(model, sf.bits, suffix="fpm", device=device)
 print(f"Resuming training from epoch {last_epoch + 1}.")
 
 del model
