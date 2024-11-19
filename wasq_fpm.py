@@ -1,11 +1,28 @@
 import torch
 
 class Superfloat:
+    CASTING_TABLE = {
+        16: torch.float32,
+        15: torch.float32,
+        14: torch.float32,
+        13: torch.float32,
+        12: torch.float32,
+        11: torch.float16,
+        10: torch.float16,
+        9: torch.float16,
+        8: torch.float16,
+        7: torch.float16,
+        6: torch.float16,
+        5: torch.float16,
+        4: torch.float16,
+    }
+
     def __init__(self, bits: int):
         assert 4 <= bits <= 16, "Superfloat bitwidth must be between 4 and 16."
         self.bits = bits
         self.mantissa_bits = bits - 1
         self.max_val = 1 - 2**-self.mantissa_bits  # Precompute max representable value
+        self.float_type = self.CASTING_TABLE[bits]  # Get float type based on bitwidth
 
     def encode(self, value: torch.Tensor) -> torch.Tensor:
         """Encodes a tensor of values into the superfloat format with optimized operations."""
@@ -39,27 +56,27 @@ class Superfloat:
         print("Decoding complete")
         return decoded_tensor
 
-sf8 = Superfloat(8)  # Create an SF8 superfloat type
+sf = Superfloat(8)  # Create an SF8 superfloat type
 
 class QuantizedLlamaModel(torch.nn.Module):
-    def __init__(self, base_model: torch.nn.Module, sf8_quantizer: Superfloat):
+    def __init__(self, base_model: torch.nn.Module, sf_quantizer: Superfloat):
         super(QuantizedLlamaModel, self).__init__()
         self.base_model = base_model
-        self.sf8_quantizer = sf8_quantizer
+        self.sf_quantizer = sf_quantizer
         self.apply_gradient_hooks()
 
     def apply_gradient_hooks(self):
         # Register a hook to quantize gradients after backward pass
         for param in self.base_model.parameters():
-            param.register_hook(lambda grad: self.sf8_quantizer.tensor_quantize(grad))
+            param.register_hook(lambda grad: self.sf_quantizer.tensor_quantize(grad))
 
     def forward(self, x):
         # Quantize activations and parameters during forward pass
-        x = self.sf8_quantizer.tensor_quantize(x)
+        x = self.sf_quantizer.tensor_quantize(x)
         for layer in self.base_model.children():
             if isinstance(layer, torch.nn.Linear):
-                layer.weight.data = self.sf8_quantizer.tensor_quantize(layer.weight.data)
-            x = self.sf8_quantizer.tensor_quantize(layer(x))
+                layer.weight.data = self.sf_quantizer.tensor_quantize(layer.weight.data)
+            x = self.sf_quantizer.tensor_quantize(layer(x))
         return x
 
 from transformers import LlamaForCausalLM, PreTrainedTokenizerFast
@@ -83,7 +100,54 @@ def quantize_model(model, sf_type):
         param.data = quantized_param.data
     return model
 
-quantized = quantize_model(model, sf8)
+quantized = quantize_model(model, sf)
+
+import os
+import re
+
+def load_checkpoint(quantized_model, sf_bits, suffix="opt", device="cuda"):
+    """
+    Load the latest checkpoint based on the provided Superfloat bitwidth and filename suffix.
+    
+    Args:
+        quantized_model: The model to load the checkpoint into.
+        sf_bits: Bitwidth of the Superfloat format (e.g., 11).
+        suffix: The suffix of the filename (default: 'opt').
+        device: Device to load the model onto ('cuda' or 'cpu').
+
+    Returns:
+        The quantized model with loaded weights and the epoch number.
+    """
+    # Define the filename pattern to search for
+    checkpoint_pattern = re.compile(f"sf{sf_bits}_.*_epoch(\\d+)_.*{suffix}$")
+
+    # Find all matching checkpoint files
+    checkpoint_files = [
+        f for f in os.listdir(".") if checkpoint_pattern.match(f)
+    ]
+
+    if not checkpoint_files:
+        print(f"No checkpoints found for sf{sf_bits} with suffix '{suffix}'.")
+        return quantized_model, 0
+
+    # Extract epoch numbers and sort by latest epoch
+    epochs_and_files = [
+        (int(checkpoint_pattern.match(f).group(1)), f) for f in checkpoint_files
+    ]
+    latest_epoch, latest_checkpoint = max(epochs_and_files, key=lambda x: x[0])
+
+    # Load the latest checkpoint
+    print(f"Loading checkpoint: {latest_checkpoint}")
+    checkpoint = torch.load(latest_checkpoint, map_location=device)
+    quantized_model.load_state_dict(checkpoint)
+    quantized_model.to(device)
+
+    return quantized_model, latest_epoch
+
+# Usage
+quantized, last_epoch = load_checkpoint(quantized, sf8.bits, suffix="opt", device=device)
+print(f"Resuming training from epoch {last_epoch + 1}.")
+
 del model
 torch.cuda.empty_cache()
 import gc
@@ -185,5 +249,5 @@ for epoch in range(num_epochs):
     # Average epoch loss
     epoch_loss /= len(train_dataloader)
     if epoch_loss < best_loss:
-        torch.save(quantized.state_dict(), f"sf8_pile_epoch{epoch+1}")
+        torch.save(quantized.state_dict(), f"sf{sf.bits}_pile_epoch{epoch+1}")
     print(f"Epoch {epoch + 1} completed with average loss: {epoch_loss:.4f}")

@@ -2,11 +2,28 @@ import torch
 from transformers import LlamaForCausalLM, PreTrainedTokenizerFast
 
 class Superfloat:
+    CASTING_TABLE = {
+        16: torch.float32,
+        15: torch.float32,
+        14: torch.float32,
+        13: torch.float32,
+        12: torch.float32,
+        11: torch.float16,
+        10: torch.float16,
+        9: torch.float16,
+        8: torch.float16,
+        7: torch.float16,
+        6: torch.float16,
+        5: torch.float16,
+        4: torch.float16,
+    }
+
     def __init__(self, bits: int):
         assert 4 <= bits <= 16, "Superfloat bitwidth must be between 4 and 16."
         self.bits = bits
         self.mantissa_bits = bits - 1
         self.max_val = 1 - 2**-self.mantissa_bits  # Precompute max representable value
+        self.float_type = self.CASTING_TABLE[bits]  # Get float type based on bitwidth
 
     def encode(self, value: torch.Tensor) -> torch.Tensor:
         """Encodes a tensor of values into the superfloat format."""
@@ -28,7 +45,7 @@ class Superfloat:
         decoded_tensor = self.decode(encoded_tensor)
         return decoded_tensor
 
-sf8 = Superfloat(8)  # Create an SF8 superfloat type
+sf = Superfloat(8)  # Create an SF8 superfloat type
 
 # Function to quantize the model
 def quantize_model(model, sf_type):
@@ -62,16 +79,16 @@ model = model.to(torch.bfloat16).to(device)
 
 # Quantize parameters
 print("Quantizing model parameters...")
-quantized_model = quantize_model(model, sf8)
+quantized_model = quantize_model(model, sf)
 
 # Verify quantization
 print("Checking model quantization...")
-is_valid = check_model_quantization(quantized_model, sf8)
+is_valid = check_model_quantization(quantized_model, sf)
 
 if is_valid:
-    print("All parameters are in bfloat16 format and within the SF8 range.")
+    print("All parameters are in {sf.float_type} format and within the SF{sf.bits} range.")
     # Save quantized model
-    save_path = "quantized_llama_sf8.pt"
+    save_path = "sf{sf.bits}_vanilla.pt"
     torch.save(quantized_model.state_dict(), save_path)
     print(f"Quantized model saved to {save_path}")
 else:
