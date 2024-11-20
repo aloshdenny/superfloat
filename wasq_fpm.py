@@ -48,7 +48,7 @@ class Superfloat:
         print("Decoding complete")
         return decoded_tensor
 
-sf = Superfloat(8)  # Create an SF8 superfloat type
+sf = Superfloat(8)
 
 class QuantizedLlamaModel(torch.nn.Module):
     def __init__(self, base_model: torch.nn.Module, sf_quantizer: Superfloat):

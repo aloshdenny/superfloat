@@ -45,7 +45,7 @@ class Superfloat:
         decoded_tensor = self.decode(encoded_tensor)
         return decoded_tensor
 
-sf = Superfloat(8)  # Create an SF8 superfloat type
+sf = Superfloat(8)
 
 # Function to quantize the model
 def quantize_model(model, sf_type):
