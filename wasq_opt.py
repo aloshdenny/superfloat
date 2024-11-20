@@ -170,7 +170,7 @@ tokenized_dataset = prepare_dataset(tokenizer)
 train_dataloader = DataLoader(tokenized_dataset, batch_size=1, shuffle=True, collate_fn=collate_fn)
 
 # Optimizer and Loss
-optimizer = torch.optim.Adam(quantized.parameters(), lr=1e-5)
+optimizer = torch.optim.Adam(quantized.parameters(), lr=1e-5, eps=1e-5)
 loss_fn = torch.nn.CrossEntropyLoss()
 
 # Training Loop

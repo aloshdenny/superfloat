@@ -199,7 +199,7 @@ train_dataloader = DataLoader(tokenized_dataset, batch_size=1, shuffle=True, col
 from tqdm import tqdm
 
 # Optimizer and Loss
-optimizer = torch.optim.Adam(quantized.parameters(), lr=1e-5)
+optimizer = torch.optim.Adam(quantized.parameters(), lr=1e-5, eps=1e-5)
 loss_fn = torch.nn.CrossEntropyLoss()
 
 num_epochs = 3
