@@ -16,11 +16,11 @@ class Superfloat:
         11: torch.float16,
         10: torch.float16,
         9: torch.float16,
-        8: torch.float16,
-        7: torch.float16,
-        6: torch.float16,
-        5: torch.float16,
-        4: torch.float16,
+        8: torch.bfloat16,
+        7: torch.bfloat16,
+        6: torch.bfloat16,
+        5: torch.bfloat16,
+        4: torch.bfloat16,
     }
 
     def __init__(self, bits: int):
@@ -204,10 +204,12 @@ for epoch in range(num_epochs):
         epoch_loss += loss.item() * accumulation_steps
 
         if (step + 1) % accumulation_steps == 0:
+            torch.nn.utils.clip_grad_value_(quantized.parameters(), clip_value = sf.max_val)
             optimizer.step()
             optimizer.zero_grad()
             epoch_iterator.set_postfix({"Loss": f"{loss.item() * accumulation_steps:.4f}"})
 
     epoch_loss /= len(train_dataloader)
-    torch.save(quantized.state_dict(), f"sf{sf.bits}_pile_epoch{epoch+1}_opt")
+    if epoch_loss < best_loss:
+        torch.save(quantized.state_dict(), f"sf{sf.bits}_{epoch+1}_opt")
     print(f"Epoch {epoch + 1} completed with average loss: {epoch_loss:.4f}")

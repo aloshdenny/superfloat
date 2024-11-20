@@ -243,6 +243,7 @@ for epoch in range(num_epochs):
 
         # Perform optimizer step after accumulating gradients
         if (step + 1) % accumulation_steps == 0:
+            torch.nn.utils.clip_grad_value_(quantized.parameters(), clip_value = sf.max_val)
             optimizer.step()
             optimizer.zero_grad()  # Clear gradients for next accumulation
 
@@ -252,5 +253,5 @@ for epoch in range(num_epochs):
     # Average epoch loss
     epoch_loss /= len(train_dataloader)
     if epoch_loss < best_loss:
-        torch.save(quantized.state_dict(), f"sf{sf.bits}_pile_epoch{epoch+1}")
+        torch.save(quantized.state_dict(), f"sf{sf.bits}_{epoch+1}_fpm")
     print(f"Epoch {epoch + 1} completed with average loss: {epoch_loss:.4f}")
