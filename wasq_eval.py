@@ -7,6 +7,8 @@ from datasets import load_dataset
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+base_dir = "./"
+
 # Function to load model
 def load_model(model_path):
     model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
@@ -104,19 +106,54 @@ def calculate_perplexity(model, tokenizer, prompt):
     return perplexity.item()
 
 # Model paths
-models = [
-    "sf{sf.bits}_vanilla",
-    "sf{sf.bits}_pile_epoch1_fpm",
-    "sf{sf.bits}_pile_epoch2_fpm",
-    "sf{sf.bits}_pile_epoch3_fpm",
-    "sf{sf.bits}_pile_epoch1_opt",
-    "sf{sf.bits}_pile_epoch2_opt",
-    "sf{sf.bits}_pile_epoch3_opt"
-]
+import os
+
+def get_model_paths(base_dir, sf_bits):
+    """
+    Dynamically generate model paths based on the sf.bits format.
+    Looks for models of the form:
+    1. sf{sf_bits}_vanilla
+    2. sf{sf_bits}_{epoch_num}_fpm
+    3. sf{sf_bits}_{epoch_num}_opt
+    
+    Args:
+        base_dir (str): The directory where the models are stored.
+        sf_bits (int): The bitwidth for the Superfloat quantizer.
+    
+    Returns:
+        List of model paths.
+    """
+    model_paths = []
+    model_pattern = f"sf{sf_bits}_"
+
+    # Scan directory for models matching the pattern
+    for model_name in os.listdir(base_dir):
+        if model_name.startswith(model_pattern):
+            model_paths.append(os.path.join(base_dir, model_name))
+
+    # Ensure models are sorted to follow the desired order: vanilla -> fpm -> opt
+    model_paths.sort()
+    
+    return model_paths
 
 # Function to evaluate perplexity for a list of models and prompts
-def evaluate_models(models, tokenizer, prompts):
+def evaluate_models(base_dir, sf_bits, tokenizer, prompts):
+    """
+    Evaluates models dynamically loaded based on the sf.bits format.
+    
+    Args:
+        base_dir (str): The directory where the models are stored.
+        sf_bits (int): The bitwidth for the Superfloat quantizer.
+        tokenizer: The tokenizer to use for model inference.
+        prompts: The list of prompts to evaluate.
+    
+    Returns:
+        Dictionary with model names and their corresponding average perplexity.
+    """
     model_perplexities = {}
+
+    # Get dynamically generated model paths
+    models = get_model_paths(base_dir, sf_bits)
 
     for model_path in models:
         model = load_model(model_path)
@@ -152,7 +189,7 @@ def load_hellaswag_data():
 prompts = load_hellaswag_data()
 
 # Evaluate all models on HellaSwag prompts
-model_perplexities = evaluate_models(models, tokenizer, prompts)
+model_perplexities = evaluate_models(base_dir, sf.bits, tokenizer, prompts)
 
 # Print final results
 print("\nAverage Perplexities for all models:")
