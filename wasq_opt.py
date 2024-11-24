@@ -121,7 +121,7 @@ def load_checkpoint(model, sf_bits, suffix="opt", device="cuda"):
 
     if not checkpoint_files:
         print(f"No checkpoints found for sf{sf_bits} with suffix '{suffix}'.")
-        return quantize_model(model, sf), 0
+        return QuantizedLlamaModel(model, sf), 0
 
     # Extract epoch numbers and sort by latest epoch
     epochs_and_files = [
