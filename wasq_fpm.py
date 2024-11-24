@@ -131,7 +131,7 @@ def load_checkpoint(model, sf_bits, suffix="fpm", device="cuda"):
 
     if not checkpoint_files:
         print(f"No checkpoints found for sf{sf_bits} with suffix '{suffix}'.")
-        return QuantizedLlamaModel(model, sf), 0
+        return quantize_model(model, sf), 0
 
     # Extract epoch numbers and sort by latest epoch
     epochs_and_files = [
@@ -163,7 +163,7 @@ from datasets import load_dataset, Dataset
 def prepare_dataset(tokenizer, max_length=512):
     """Prepare the dataset with proper tensor formatting."""
     # dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-    dataset = Dataset.from_parquet('train-00000-of-01650-f70471ee3deb09c0.parquet')
+    dataset = Dataset.from_parquet('train.parquet')
     def tokenize_function(examples):
         outputs = tokenizer(
             examples["text"],

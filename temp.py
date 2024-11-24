@@ -53,29 +53,100 @@ class Superfloat:
 
 sf = Superfloat(11)
 
-class QuantizedLlamaModel(torch.nn.Module):
-    def __init__(self, base_model: torch.nn.Module, sf_quantizer: Superfloat):
+class QuantizedLlamaModel(nn.Module):
+    def __init__(self, base_model: nn.Module, sf_quantizer: Superfloat):
         super(QuantizedLlamaModel, self).__init__()
         self.base_model = base_model
         self.sf_quantizer = sf_quantizer
+        self.dtype = self.sf_quantizer.float_type
+        self._quantize_and_convert_parameters()
         self.apply_gradient_hooks()
 
-    def apply_gradient_hooks(self):
-        for param in self.base_model.parameters():
-            def hook(grad, param=param):
-                _, out_of_range = self.sf_quantizer.tensor_quantize(param)
-                grad = grad * out_of_range.to(grad.dtype)  # Mask to allow gradients only on out-of-range params
-                return grad
-            param.register_hook(hook)
+    def _quantize_and_convert_parameters(self):
+        """Quantize all model parameters and ensure consistent dtype"""
+        for name, param in self.base_model.named_parameters():
+            if param.dtype != self.dtype:
+                param.data = param.data.to(self.dtype)
+            quantized_param, _ = self.sf_quantizer.tensor_quantize(param.data)
+            param.data.copy_(quantized_param)
 
-    def forward(self, x):
-        x, _ = self.sf_quantizer.tensor_quantize(x)
-        for layer in self.base_model.children():
-            if isinstance(layer, torch.nn.Linear):
-                layer.weight.data, _ = self.sf_quantizer.tensor_quantize(layer.weight.data)
-            x = layer(x)
-            x, _ = self.sf_quantizer.tensor_quantize(x)
-        return x
+    def apply_gradient_hooks(self):
+        """Apply gradient hooks to all parameters for quantization during training"""
+        for param in self.base_model.parameters():
+            if param.requires_grad:
+                def hook(grad, param=param):
+                    if grad.dtype != self.dtype:
+                        grad = grad.to(self.dtype)
+                    quantized_grad, _ = self.sf_quantizer.tensor_quantize(grad)
+                    _, out_of_range = self.sf_quantizer.tensor_quantize(param)
+                    masked_grad = quantized_grad * out_of_range.to(grad.dtype)
+                    return masked_grad
+                param.register_hook(hook)
+
+    def _quantize_activation(self, x):
+        """Quantize activation tensors with dtype handling"""
+        if not x.is_floating_point():  # Skip quantization for non-float tensors
+            return x
+        if x.dtype != self.dtype:
+            x = x.to(self.dtype)
+        quantized_x, _ = self.sf_quantizer.tensor_quantize(x)
+        return quantized_x
+
+    def forward(self, input_ids=None, attention_mask=None, **kwargs):
+        # Keep input_ids as Long type for embedding layer
+        # Only convert attention_mask to float dtype if it exists
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.dtype)
+        
+        # Handle input quantization
+        def quantize_module_fn(module, inputs, outputs):
+            if isinstance(outputs, torch.Tensor):
+                if outputs.is_floating_point():  # Only quantize float tensors
+                    return self._quantize_activation(outputs)
+                return outputs
+            elif isinstance(outputs, tuple):
+                return tuple(self._quantize_activation(o) if isinstance(o, torch.Tensor) and o.is_floating_point() else o 
+                           for o in outputs)
+            return outputs
+
+        # Register forward hooks for all modules
+        hooks = []
+        for name, module in self.base_model.named_modules():
+            if isinstance(module, (nn.Linear, nn.LayerNorm)):
+                hook = module.register_forward_hook(quantize_module_fn)
+                hooks.append(hook)
+
+            # Ensure all module parameters have correct dtype
+            for param_name, param in module.named_parameters(recurse=False):
+                if param.dtype != self.dtype and param.is_floating_point():
+                    param.data = param.data.to(self.dtype)
+
+        try:
+            # Forward pass through the model
+            outputs = self.base_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **kwargs
+            )
+        finally:
+            # Remove the hooks
+            for hook in hooks:
+                hook.remove()
+
+        return outputs
+
+    def generate(self, *args, **kwargs):
+        """Handle generation while maintaining correct dtypes"""
+        # Convert only float tensors to the correct dtype
+        converted_args = [
+            arg.to(self.dtype) if isinstance(arg, torch.Tensor) and arg.is_floating_point()
+            else arg for arg in args
+        ]
+        converted_kwargs = {
+            k: v.to(self.dtype) if isinstance(v, torch.Tensor) and v.is_floating_point()
+            else v for k, v in kwargs.items()
+        }
+        return self.base_model.generate(*converted_args, **converted_kwargs)
 
 # Initialize model and tokenizer
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -121,7 +192,7 @@ def load_checkpoint(model, sf_bits, suffix="opt", device="cuda"):
 
     if not checkpoint_files:
         print(f"No checkpoints found for sf{sf_bits} with suffix '{suffix}'.")
-        return quantize_model(model, sf), 0
+        return QuantizedLlamaModel(model, sf), 0
 
     # Extract epoch numbers and sort by latest epoch
     epochs_and_files = [
@@ -178,7 +249,15 @@ num_epochs = 3
 accumulation_steps = 32  # Number of steps to accumulate gradients
 best_loss = float('inf')
 
+# Training script changes
 quantized.to(device)
+
+optimizer = torch.optim.Adam(quantized.parameters(), lr=1e-5, eps=1e-4)
+loss_fn = torch.nn.CrossEntropyLoss()
+
+num_epochs = 3
+accumulation_steps = 32  # Number of steps to accumulate gradients
+best_loss = float('inf')
 
 for epoch in range(num_epochs):
     epoch_loss = 0.0
@@ -197,19 +276,26 @@ for epoch in range(num_epochs):
         # Calculate loss
         loss = loss_fn(logits.view(-1, logits.size(-1)), target.view(-1)) / accumulation_steps
 
-        # Backward pass with gradient quantization
+        # Backward pass
         loss.backward()
 
         # Accumulate loss for reporting
         epoch_loss += loss.item() * accumulation_steps
 
         if (step + 1) % accumulation_steps == 0:
-            torch.nn.utils.clip_grad_value_(quantized.parameters(), clip_value = sf.max_val)
+            # Apply gradient updates
             optimizer.step()
             optimizer.zero_grad()
+
+            # Clamp only out-of-range parameters
+            for param in quantized.parameters():
+                _, out_of_range = sf.tensor_quantize(param.data)
+                param.data[out_of_range] = torch.clamp(param.data[out_of_range], min=-sf.max_val, max=sf.max_val)
+
             epoch_iterator.set_postfix({"Loss": f"{loss.item() * accumulation_steps:.4f}"})
 
     epoch_loss /= len(train_dataloader)
     if epoch_loss < best_loss:
-        torch.save(quantized.state_dict(), f"sf{sf.bits}_{epoch+1}_opt")
+        best_loss = epoch_loss
+        torch.save(quantized.state_dict(), f"sf{sf.bits}_{epoch + 1}_opt")
     print(f"Epoch {epoch + 1} completed with average loss: {epoch_loss:.4f}")
