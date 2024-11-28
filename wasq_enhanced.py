@@ -250,8 +250,8 @@ def train_model(quantized_model, sf, device, num_epochs=3):
         epoch_loss /= len(train_dataloader)
         if epoch_loss < best_loss:
             torch.save(
-                quantized_model.state_dict(), 
-                f"sf{sf.bits}_{epoch+1}_opt"
+                quantized_model.state_dict(),
+                f"sf{sf.bits}_{epoch+1}_enhanced"
             )
         print(f"Epoch {epoch + 1} completed with average loss: {epoch_loss:.4f}")
 
