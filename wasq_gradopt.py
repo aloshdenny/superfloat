@@ -1,10 +1,34 @@
+import os
+import re
+import gc
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.cuda.amp import GradScaler, autocast
 from transformers import LlamaForCausalLM, PreTrainedTokenizerFast
 from torch.utils.data import DataLoader
 from datasets import load_dataset, Dataset
 from tqdm import tqdm
-import gc
+import numpy as np
+
+class QuantizationMetrics:
+    def __init__(self):
+        self.out_of_range_params = []
+        self.layer_bitwidths = []
+    
+    def track(self, model, sf_quantizer):
+        for name, param in model.named_parameters():
+            _, out_of_range = sf_quantizer.tensor_quantize(param)
+            self.out_of_range_params.append(out_of_range.float().mean())
+
+class AdaptiveQuantizationMask(nn.Module):
+    def __init__(self, layer_size):
+        super().__init__()
+        self.quantization_mask = nn.Parameter(torch.ones(layer_size, requires_grad=True))
+        
+    def forward(self, tensor):
+        return tensor * self.quantization_mask
 
 class Superfloat:
     CASTING_TABLE = {
@@ -27,8 +51,13 @@ class Superfloat:
         assert 4 <= bits <= 16, "Superfloat bitwidth must be between 4 and 16."
         self.bits = bits
         self.mantissa_bits = bits - 1
-        self.max_val = 1 - 2**-self.mantissa_bits  # Precompute max representable value
-        self.float_type = self.CASTING_TABLE[bits]  # Get float type based on bitwidth
+        self.max_val = 1 - 2**-self.mantissa_bits
+        self.float_type = self.CASTING_TABLE[bits]
+
+    def adaptive_bitwidth(self, layer_weights):
+        """Dynamically adjust bit allocation based on layer importance"""
+        weight_variance = torch.var(layer_weights)
+        return min(16, max(4, int(8 + weight_variance * 4)))
 
     def encode(self, value: torch.Tensor) -> torch.Tensor:
         """Encodes a tensor of values into the superfloat format."""
@@ -51,163 +80,60 @@ class Superfloat:
         decoded_tensor = self.decode(encoded_tensor)
         return decoded_tensor, out_of_range
 
-# SF-Grad Gradient Quantization Function
-def superfloat_gradient_quantization(model, gradients, mode='van'):
-    """
-    Quantize gradients using SuperFloat principles
-    
-    Args:
-        model: Neural network model
-        gradients: Computed gradients
-        mode: Quantization mode ('van', 'adp', 'pac')
-    
-    Returns:
-        Quantized gradients
-    """
-    quantized_gradients = {}
-    
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            grad = param.grad
-            
-            if mode == 'van':
-                # Vanilla: Simple clamping
-                quantized_grad = torch.clamp(
-                    grad, 
-                    min=-1.0, 
-                    max=1.0
-                )
-            
-            elif mode == 'adp':
-                # Adaptive: Layer-wise dynamic range
-                layer_stats = {
-                    'mean': grad.mean(),
-                    'std': grad.std(),
-                    'percentile_99': torch.quantile(grad, 0.99)
-                }
-                
-                quantized_grad = torch.clamp(
-                    grad,
-                    min=layer_stats['mean'] - 2*layer_stats['std'],
-                    max=layer_stats['mean'] + 2*layer_stats['std']
-                )
-            
-            elif mode == 'pac':
-                # Precision-Aware: Global and local statistics
-                global_mean = torch.mean(grad)
-                global_std = torch.std(grad)
-                
-                quantized_grad = torch.clamp(
-                    grad,
-                    min=global_mean - 3*global_std,
-                    max=global_mean + 3*global_std
-                )
-            
-            quantized_gradients[name] = quantized_grad
-    
-    return quantized_gradients
-
-def loss_quantization(loss, method='log_clip'):
-    """
-    Quantize loss value
-    
-    Args:
-        loss: Original loss value
-        method: Quantization technique
-    
-    Returns:
-        Quantized loss
-    """
-    if method == 'log_clip':
-        # Logarithmic scaling with clipping
-        epsilon = 1e-7
-        log_loss = torch.log(loss + epsilon)
-        quantized_loss = torch.clamp(
-            log_loss, 
-            min=-10, 
-            max=10
-        )
-        return torch.exp(quantized_loss)
-    
-    elif method == 'percentile_clip':
-        # Percentile-based clipping
-        loss_percentile = torch.quantile(loss, 0.95)
-        return torch.min(loss, loss_percentile)
+def quantization_loss(model, lambda_sparse=0.001):
+    """Add sparsity-inducing loss to the model"""
+    sparse_loss = sum(torch.sum(torch.abs(param)) for param in model.parameters())
+    return sparse_loss * lambda_sparse
 
 class QuantizedLlamaModel(torch.nn.Module):
-    def __init__(self, base_model: torch.nn.Module, sf_quantizer: Superfloat, grad_mode='van'):
+    def __init__(self, base_model: torch.nn.Module, sf_quantizer: Superfloat):
         super(QuantizedLlamaModel, self).__init__()
         self.base_model = base_model
         self.sf_quantizer = sf_quantizer
-        self.grad_mode = grad_mode
+        self.quantization_metrics = QuantizationMetrics()
+        self.adaptive_masks = nn.ModuleDict()
         self.apply_gradient_hooks()
+        self.prepare_adaptive_masks()
+
+    def prepare_adaptive_masks(self):
+        """Create adaptive quantization masks for each layer"""
+        for name, param in self.base_model.named_parameters():
+            if param.requires_grad:
+                self.adaptive_masks[name.replace('.', '_')] = AdaptiveQuantizationMask(param.size())
 
     def apply_gradient_hooks(self):
+        """Apply quantization and gradient hooks to model parameters"""
         for param in self.base_model.parameters():
             def hook(grad, param=param):
+                # Track out-of-range parameters
                 _, out_of_range = self.sf_quantizer.tensor_quantize(param)
-                grad = grad * out_of_range.to(grad.dtype)  # Mask to allow gradients only on out-of-range params
+                self.quantization_metrics.track(self, self.sf_quantizer)
+                
+                # Adaptive gradient masking
+                grad = grad * out_of_range.to(grad.dtype)
                 return grad
             param.register_hook(hook)
 
     def forward(self, x):
+        """Forward pass with quantization at each layer"""
         x, _ = self.sf_quantizer.tensor_quantize(x)
-        for layer in self.base_model.children():
+        
+        for name, layer in self.base_model.named_children():
             if isinstance(layer, torch.nn.Linear):
+                # Apply adaptive quantization mask
+                mask_name = name.replace('.', '_')
+                layer.weight.data = layer.weight.data * self.adaptive_masks[mask_name](layer.weight.data)
+                
+                # Quantize layer weights
                 layer.weight.data, _ = self.sf_quantizer.tensor_quantize(layer.weight.data)
+            
             x = layer(x)
             x, _ = self.sf_quantizer.tensor_quantize(x)
+        
         return x
 
-# Initialization and Hyperparameters
-sf = Superfloat(11)  # 11-bit Superfloat configuration
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-
-model_name = "meta-llama/Llama-3.2-1B"
-model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
-model = model.to(sf.float_type).to(device)
-
-# Tokenizer Setup
-tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name, cache_dir='./', token='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')
-tokenizer.pad_token = tokenizer.eos_token
-
-# Quantization of Model Weights
-def quantize_model(model, sf_type):
-    for name, param in model.named_parameters():
-        quantized_param, _ = sf_type.tensor_quantize(param)
-        param.data = quantized_param.data
-    return model
-
-# Checkpoint Loading Function
-import os
-import re
-
-def load_checkpoint(model, sf_bits, suffix="opt", device="cuda"):
-    checkpoint_pattern = re.compile(f"sf{sf_bits}_.*_epoch(\\d+)_.*{suffix}$")
-
-    checkpoint_files = [
-        f for f in os.listdir(".") if checkpoint_pattern.match(f)
-    ]
-
-    if not checkpoint_files:
-        print(f"No checkpoints found for sf{sf_bits} with suffix '{suffix}'.")
-        return quantize_model(model, sf), 0
-
-    epochs_and_files = [
-        (int(checkpoint_pattern.match(f).group(1)), f) for f in checkpoint_files
-    ]
-    latest_epoch, latest_checkpoint = max(epochs_and_files, key=lambda x: x[0])
-
-    print(f"Loading checkpoint: {latest_checkpoint}")
-    checkpoint = torch.load(latest_checkpoint, map_location=device)
-    model.load_state_dict(checkpoint)
-    model.to(device)
-
-    return model, latest_epoch
-
-# Dataset Preparation
 def prepare_dataset(tokenizer, max_length=1024):
+    """Prepare and tokenize dataset"""
     dataset = Dataset.from_parquet('train.parquet')
     def tokenize_function(examples):
         return tokenizer(
@@ -221,94 +147,121 @@ def prepare_dataset(tokenizer, max_length=1024):
     return tokenized_dataset
 
 def collate_fn(batch):
+    """Custom collate function for dataloader"""
     input_ids = torch.stack([torch.tensor(example['input_ids']) for example in batch])
     attention_mask = torch.stack([torch.tensor(example['attention_mask']) for example in batch])
     return {'input_ids': input_ids, 'attention_mask': attention_mask}
 
-# Main Training Script
-def train_model(model, sf, tokenizer, device, grad_mode='van', loss_mode='log_clip'):
-    # Prepare Quantized Model
-    quantized_model = QuantizedLlamaModel(model, sf, grad_mode)
-    quantized_model.to(device)
+def load_checkpoint(model, sf_bits, suffix="opt", device="cuda"):
+    """Load the latest checkpoint based on Superfloat bitwidth"""
+    checkpoint_pattern = re.compile(f"sf{sf_bits}_.*_epoch(\\d+)_.*{suffix}$")
+    checkpoint_files = [f for f in os.listdir(".") if checkpoint_pattern.match(f)]
 
-    # Checkpoint Loading (Optional)
+    if not checkpoint_files:
+        print(f"No checkpoints found for sf{sf_bits} with suffix '{suffix}'.")
+        return model, 0
+
+    epochs_and_files = [(int(checkpoint_pattern.match(f).group(1)), f) for f in checkpoint_files]
+    latest_epoch, latest_checkpoint = max(epochs_and_files, key=lambda x: x[0])
+
+    print(f"Loading checkpoint: {latest_checkpoint}")
+    checkpoint = torch.load(latest_checkpoint, map_location=device)
+    model.load_state_dict(checkpoint)
+    model.to(device)
+
+    return model, latest_epoch
+
+def main():
+    # Configuration
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Superfloat Configuration
+    sf = Superfloat(11)  # Adaptive bitwidth can be implemented here
+
+    # Model and Tokenizer
+    model_name = "meta-llama/Llama-3.2-1B"
+    model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='your_huggingface_token')
+    model = model.to(sf.float_type).to(device)
+
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name, cache_dir='./', token='your_huggingface_token')
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # Quantized Model Wrapper
+    quantized_model = QuantizedLlamaModel(model, sf)
     quantized_model, last_epoch = load_checkpoint(quantized_model, sf.bits, suffix="opt", device=device)
-    print(f"Resuming training from epoch {last_epoch + 1}.")
 
-    # Prepare Dataset and Dataloader
+    # Prepare Dataset
     tokenized_dataset = prepare_dataset(tokenizer)
     train_dataloader = DataLoader(tokenized_dataset, batch_size=1, shuffle=True, collate_fn=collate_fn)
 
-    # Optimizer and Loss
-    optimizer = torch.optim.Adam(quantized_model.parameters(), lr=1e-5, eps=1e-4)
-    loss_fn = torch.nn.CrossEntropyLoss()
+    # Optimizer and Scheduler
+    optimizer = optim.AdamW(quantized_model.parameters(), lr=1e-4, eps=1e-8, weight_decay=0.01)
+    scheduler = CosineAnnealingLR(optimizer, T_max=3, eta_min=1e-6)
+    
+    # Mixed Precision
+    scaler = GradScaler()
 
-    # Training Configuration
+    # Training Loop
     num_epochs = 3
     accumulation_steps = 32
     best_loss = float('inf')
 
-    # Training Loop
-    for epoch in range(last_epoch, last_epoch + num_epochs):
+    quantized_model.to(device)
+    quantized_model.train()
+
+    for epoch in range(last_epoch + 1, last_epoch + num_epochs + 1):
         epoch_loss = 0.0
-        epoch_iterator = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f"Epoch {epoch + 1}")
+        epoch_iterator = tqdm(enumerate(train_dataloader), total=len(train_dataloader), 
+                               desc=f"Epoch {epoch}/{last_epoch + num_epochs}")
 
         for step, batch in epoch_iterator:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
 
-            # Forward pass
-            outputs = quantized_model(input_ids=input_ids, attention_mask=attention_mask)
-            logits = outputs.logits
-            target = input_ids[:, 1:].contiguous()
-            logits = logits[:, :-1].contiguous()
+            with autocast(enabled=True):
+                outputs = quantized_model(input_ids=input_ids, attention_mask=attention_mask)
+                logits = outputs.logits
+                target = input_ids[:, 1:].contiguous()
+                logits = logits[:, :-1].contiguous()
 
-            # Calculate and Quantize Loss
-            loss = loss_fn(logits.view(-1, logits.size(-1)), target.view(-1)) / accumulation_steps
-            quantized_loss = loss_quantization(loss, method=loss_mode)
+                loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1))
+                
+                # Add quantization loss
+                loss += quantization_loss(quantized_model)
 
-            # Backward pass with gradient quantization
-            quantized_loss.backward()
+                scaled_loss = loss / accumulation_steps
 
-            # Accumulate loss for reporting
-            epoch_loss += quantized_loss.item() * accumulation_steps
+            scaler.scale(scaled_loss).backward()
 
             if (step + 1) % accumulation_steps == 0:
-                # Apply SF-Grad Gradient Quantization
-                quantized_grads = superfloat_gradient_quantization(quantized_model, quantized_model.parameters(), mode=grad_mode)
+                # Gradient clipping
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(quantized_model.parameters(), max_norm=1.0)
                 
-                # Apply quantized gradients manually
-                for name, param in quantized_model.named_parameters():
-                    if param.requires_grad and name in quantized_grads:
-                        param.grad = quantized_grads[name]
-
-                # Gradient Clipping
-                torch.nn.utils.clip_grad_value_(quantized_model.parameters(), clip_value=sf.max_val)
-                
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 optimizer.zero_grad()
-                epoch_iterator.set_postfix({"Loss": f"{quantized_loss.item() * accumulation_steps:.4f}"})
 
-        # Loss and Checkpoint Handling
+            epoch_loss += loss.item()
+            epoch_iterator.set_postfix({"Loss": f"{loss.item():.4f}"})
+
+        # Learning rate scheduling
+        scheduler.step()
+
+        # Average epoch loss
         epoch_loss /= len(train_dataloader)
-        
+        print(f"Epoch {epoch} completed with average loss: {epoch_loss:.4f}")
+
+        # Save best model
         if epoch_loss < best_loss:
             best_loss = epoch_loss
-            checkpoint_path = f"sf{sf.bits}_{epoch+1}_opt"
-            torch.save(quantized_model.state_dict(), checkpoint_path)
-            print(f"New best model saved to {checkpoint_path}")
+            torch.save(quantized_model.state_dict(), f"sf{sf.bits}_{epoch}_best_opt")
 
-        print(f"Epoch {epoch + 1} completed with average loss: {epoch_loss:.4f}")
+        # Cleanup
+        del input_ids, attention_mask, outputs
+        torch.cuda.empty_cache()
+        gc.collect()
 
-# Example Usage
 if __name__ == "__main__":
-    # Different Gradient Quantization Modes
-    grad_modes = ['van', 'adp', 'pac']
-    loss_modes = ['log_clip', 'percentile_clip']
-
-    for grad_mode in grad_modes:
-        for loss_mode in loss_modes:
-            print(f"\nTraining with Gradient Mode: {grad_mode}, Loss Mode: {loss_mode}")
-            # Reset model for each configuration
-            reset_model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
-            train_model(reset_model, sf, tokenizer, device, grad_mode, loss_mode)
+    main()
