@@ -1,20 +1,20 @@
 import torch
 import torch.nn as nn
-from transformers import LlamaForCausalLM, PreTrainedTokenizerFast
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 from datasets import load_dataset, Dataset
 
 # Load model and tokenizer
-model_name = "meta-llama/Llama-3.2-1B"
+model_name = "Qwen/Qwen2-0.5B"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
+model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
 model = model.to(device)
 model.eval()
 
-tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name, cache_dir='./', token='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')
+tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir='./', token='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')
 tokenizer.pad_token = tokenizer.eos_token
 
 # Register gradient hooks to capture gradients
@@ -43,36 +43,53 @@ def plot_gradient_flow(gradients):
     plt.tight_layout()
     plt.show()
 
-# Extract attention maps from attention layers
 def extract_attention_maps(model, inputs):
     attention_maps = []
 
     def hook(module, inputs, outputs):
-        attention_maps.append(outputs[1].detach())  # Assuming attention weights are at index 1
+        attention_maps.append(outputs[1].detach())  # Ensure we're saving attention weights
 
     # Register hooks on all attention layers
     hooks = []
     for name, module in model.named_modules():
-        if "attention" in name.lower():  # Identify attention layers (adapt based on your model)
+        if "attention" in name.lower():  # Identify attention layers
             hooks.append(module.register_forward_hook(hook))
 
-    # Perform forward pass
+    # Perform forward pass and make sure we request attention outputs
     with torch.no_grad():
-        model(**inputs)
+        model(**inputs, output_attentions=True)
 
-    # Remove hooks
+    # Remove hooks after forward pass
     for hook in hooks:
         hook.remove()
 
     return attention_maps
 
-# Visualize attention heatmap for a specific layer and head
 def visualize_attention(attention_map, input_tokens, layer_idx=0, head_idx=0):
+    # Extract the attention map for the specific layer
+    attention_map_data = attention_map[layer_idx]  # Extract the specific layer's attention weights
+
+    # Check the shape of the attention map to ensure it's 3D
+    print(f"Attention map shape for layer {layer_idx}: {attention_map_data.shape}")
+
+    # Assuming the attention map shape is [batch_size, num_heads, seq_len, seq_len]
+    # Select the first sample (batch_size index 0) and the head at head_idx
+    if len(attention_map_data.shape) == 3:
+        attention_map_data = attention_map_data[0, head_idx]  # Select batch (0) and head (head_idx)
+
+    # Ensure the attention map is 2D (seq_len x seq_len)
+    if len(attention_map_data.shape) == 2:
+        print("Correct shape for heatmap")
+    else:
+        print(f"Warning: Attention map data does not have the correct shape for visualization. Found shape: {attention_map_data.shape}")
+        return
+
+    # Now pass the attention map data to seaborn
     sns.heatmap(
-        attention_map[layer_idx][0, head_idx].cpu().numpy(),
+        attention_map_data,
         xticklabels=input_tokens,
         yticklabels=input_tokens,
-        cmap="viridis"
+        cmap="magma"
     )
     plt.title(f"Layer {layer_idx + 1}, Head {head_idx + 1} Attention Map", fontsize=14)
     plt.xlabel("Input Tokens")
@@ -123,7 +140,6 @@ def prepare_hellaswag_dataset(tokenizer, max_length=128):
 # Load the tokenized HellaSwag dataset
 tokenized_dataset = prepare_hellaswag_dataset(tokenizer)
 
-# Function to perform gradient flow and attention map visualization on HellaSwag data
 def analyze_hellaswag_with_gradient_and_attention(model, tokenizer, tokenized_dataset, num_samples=5):
     """
     Performs gradient flow analysis and visualizes attention maps for the HellaSwag dataset.
@@ -142,9 +158,10 @@ def analyze_hellaswag_with_gradient_and_attention(model, tokenizer, tokenized_da
         input_ids = tokenized_input['input_ids'].squeeze(0).to(device)
         attention_mask = tokenized_input['attention_mask'].squeeze(0).to(device)
 
-        # Forward pass
-        outputs = model(input_ids=input_ids.unsqueeze(0), attention_mask=attention_mask.unsqueeze(0))
+        # Forward pass with output_attentions=True to extract attention weights
+        outputs = model(input_ids=input_ids.unsqueeze(0), attention_mask=attention_mask.unsqueeze(0), output_attentions=True)
         logits = outputs.logits
+        attention_weights = outputs.attentions  # List of attention layers
 
         # Compute dummy loss (shifted target for language modeling task)
         target = input_ids[1:]  # Shift input as target
@@ -161,10 +178,17 @@ def analyze_hellaswag_with_gradient_and_attention(model, tokenizer, tokenized_da
 
         # Extract and visualize attention maps
         print(f"Attention Map Visualization for Sample {idx + 1}")
-        attention_maps = extract_attention_maps(model, {"input_ids": input_ids.unsqueeze(0), "attention_mask": attention_mask.unsqueeze(0)})
-
         input_tokens = tokenizer.convert_ids_to_tokens(input_ids.cpu().tolist())
-        visualize_attention(attention_maps, input_tokens, layer_idx=0, head_idx=0)  # Adjust layer/head as needed
+        
+        # Choose a layer and head to visualize (e.g., layer 0, head 0)
+        layer_idx = 0
+        head_idx = 0
+
+        # Attention weights are a list of (batch_size, num_heads, seq_len, seq_len) tensors for each layer
+        attention_map = attention_weights[layer_idx][0, head_idx].cpu().detach().numpy()
+        
+        # Visualize the attention map
+        visualize_attention(attention_map, input_tokens, layer_idx=layer_idx, head_idx=head_idx)
 
         # Clear gradients for the next sample
         model.zero_grad()
