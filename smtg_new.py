@@ -7,6 +7,9 @@ from datasets import load_dataset
 from tqdm import tqdm
 import copy
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
 class WASQ:
     """
     Weight-Aware Selective Quantization (WASQ) class
