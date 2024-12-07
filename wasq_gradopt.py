@@ -179,10 +179,11 @@ def main():
 
     # Model and Tokenizer
     model_name = "meta-llama/Llama-3.2-1B"
-    model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='your_huggingface_token')
+    model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
     model = model.to(sf.float_type).to(device)
+    print(model)
 
-    tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name, cache_dir='./', token='your_huggingface_token')
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name, cache_dir='./', token='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')
     tokenizer.pad_token = tokenizer.eos_token
 
     # Quantized Model Wrapper
