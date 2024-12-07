@@ -108,29 +108,27 @@ class QuantizedLlamaModel(torch.nn.Module):
                 # Track out-of-range parameters
                 _, out_of_range = self.sf_quantizer.tensor_quantize(param)
                 self.quantization_metrics.track(self, self.sf_quantizer)
-                
+
                 # Adaptive gradient masking
                 grad = grad * out_of_range.to(grad.dtype)
                 return grad
             param.register_hook(hook)
 
-    def forward(self, x):
+    def forward(self, input_ids=None, attention_mask=None, **kwargs):
         """Forward pass with quantization at each layer"""
-        x, _ = self.sf_quantizer.tensor_quantize(x)
-        
+        # Quantize input tensors
+        input_ids, _ = self.sf_quantizer.tensor_quantize(input_ids)
+        attention_mask, _ = self.sf_quantizer.tensor_quantize(attention_mask)
+
+        # Apply quantization and adaptive masks to model weights
         for name, layer in self.base_model.named_children():
             if isinstance(layer, torch.nn.Linear):
-                # Apply adaptive quantization mask
                 mask_name = name.replace('.', '_')
                 layer.weight.data = layer.weight.data * self.adaptive_masks[mask_name](layer.weight.data)
-                
-                # Quantize layer weights
                 layer.weight.data, _ = self.sf_quantizer.tensor_quantize(layer.weight.data)
-            
-            x = layer(x)
-            x, _ = self.sf_quantizer.tensor_quantize(x)
-        
-        return x
+
+        # Forward through the base model
+        return self.base_model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
 
 def prepare_dataset(tokenizer, max_length=1024):
     """Prepare and tokenize dataset"""
