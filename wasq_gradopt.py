@@ -128,7 +128,17 @@ class QuantizedLlamaModel(torch.nn.Module):
                 layer.weight.data, _ = self.sf_quantizer.tensor_quantize(layer.weight.data)
 
         # Forward through the base model
-        return self.base_model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+        outputs = self.base_model.model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+
+        # Process the lm_head explicitly if it exists
+        if hasattr(self.base_model, 'lm_head'):
+            logits = self.base_model.lm_head(outputs.last_hidden_state)
+            logits, _ = self.sf_quantizer.tensor_quantize(logits)
+        else:
+            raise KeyError("The base model does not contain 'lm_head'.")
+
+        return logits
+
 
 def prepare_dataset(tokenizer, max_length=1024):
     """Prepare and tokenize dataset"""
