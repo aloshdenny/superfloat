@@ -10,11 +10,11 @@ from tqdm import tqdm
 model_name = "Qwen/Qwen2-0.5B"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = AutoModelForCausalLM.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir="./cache", token='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')
 model = model.to(device)
 model.eval()
 
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir="./cache", token='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')
 tokenizer.pad_token = tokenizer.eos_token
 
 def prepare_hellaswag_dataset(tokenizer, max_length=128, num_samples=None):
