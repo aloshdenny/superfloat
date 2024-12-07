@@ -4,6 +4,7 @@ from transformers import LlamaForCausalLM, PreTrainedTokenizerFast
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
+from datasets import load_dataset, Dataset
 
 # Load model and tokenizer
 model_name = "meta-llama/Llama-3.2-1B"
