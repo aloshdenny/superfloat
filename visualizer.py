@@ -1,11 +1,10 @@
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 from tqdm import tqdm
-import numpy as np
 
 # Load model and tokenizer
 model_name = "Qwen/Qwen2-0.5B"
@@ -20,109 +19,87 @@ tokenizer.pad_token = tokenizer.eos_token
 
 def prepare_hellaswag_dataset(tokenizer, max_length=128, num_samples=None):
     """
-    Loads the HellaSwag dataset and tokenizes it for the model.
-    
-    Args:
-        tokenizer: The tokenizer to use for tokenizing text.
-        max_length: Maximum length for tokenized sequences.
-        num_samples: Number of samples to use (None for full dataset)
-    
-    Returns:
-        Tokenized dataset
+    Loads and tokenizes the HellaSwag dataset.
     """
-    # Load validation split of HellaSwag
     dataset = load_dataset("hellaswag", split="validation")
     
-    # Limit samples if specified
     if num_samples is not None:
         dataset = dataset.select(range(min(num_samples, len(dataset))))
 
-    # Tokenize prompts (contexts)
     def tokenize_example(example):
         return tokenizer(
-            example['ctx'],  # Context field in HellaSwag
+            example['ctx'],
             max_length=max_length,
             truncation=True,
             padding="max_length",
             return_tensors="pt"
         )
 
-    # Tokenize all examples in the dataset
     tokenized_dataset = [tokenize_example(entry) for entry in tqdm(dataset, desc="Tokenizing HellaSwag")]
 
     return tokenized_dataset
 
-def compute_average_attention_activations(model, tokenized_dataset):
+def compute_layer_activation_magnitudes(model, tokenized_dataset):
     """
-    Compute average attention activations across all samples.
-    
-    Args:
-        model: The pretrained model
-        tokenized_dataset: Tokenized HellaSwag dataset
-    
-    Returns:
-        Average attention activations for each layer and head
+    Compute activation magnitudes for each layer across all samples.
     """
-    # List to store attention activations for each sample
-    all_attention_activations = []
+    layer_activations = []
 
-    # Process each sample in the dataset
+    def register_activation_hook(layers):
+        def hook(module, input, output):
+            # Capture magnitude of activations
+            if isinstance(output, torch.Tensor):
+                # Compute mean absolute activation magnitude
+                layers.append(torch.abs(output).mean().item())
+        return hook
+
     for tokenized_input in tqdm(tokenized_dataset, desc="Processing Samples"):
-        input_ids = tokenized_input['input_ids'].squeeze(0).to(device)
-        attention_mask = tokenized_input['attention_mask'].squeeze(0).to(device)
-
-        # Forward pass with output_attentions=True to extract attention weights
+        # Reset layer activations for each sample
+        current_sample_layers = []
+        
+        # Remove any existing hooks
+        hooks = []
+        
+        # Register hooks on transformer layers
+        for name, module in model.named_modules():
+            if 'transformer.layers' in name or 'model.layers' in name:
+                hook = module.register_forward_hook(register_activation_hook(current_sample_layers))
+                hooks.append(hook)
+        
+        # Perform forward pass
         with torch.no_grad():
-            outputs = model(
-                input_ids=input_ids.unsqueeze(0), 
-                attention_mask=attention_mask.unsqueeze(0), 
-                output_attentions=True
-            )
+            input_ids = tokenized_input['input_ids'].squeeze(0).to(device)
+            attention_mask = tokenized_input['attention_mask'].squeeze(0).to(device)
+            model(input_ids=input_ids.unsqueeze(0), attention_mask=attention_mask.unsqueeze(0))
         
-        # Extract attention weights
-        attention_weights = outputs.attentions
+        # Remove hooks
+        for hook in hooks:
+            hook.remove()
         
-        # Convert attention weights to numpy and compute mean activation
-        sample_activations = []
-        for layer_attn in attention_weights:
-            # layer_attn shape: [batch_size, num_heads, seq_len, seq_len]
-            layer_mean = layer_attn.mean(dim=(0, 3)).cpu().numpy()
-            sample_activations.append(layer_mean)
-        
-        all_attention_activations.append(sample_activations)
+        # Store layer activations for this sample
+        layer_activations.append(current_sample_layers)
 
     # Compute average across all samples
-    avg_attention_activations = np.mean(all_attention_activations, axis=0)
-
-    return avg_attention_activations
-
-def visualize_attention_activations(avg_attention_activations):
-    """
-    Visualize average attention activations across layers and heads.
+    avg_layer_activations = np.mean(layer_activations, axis=0)
     
-    Args:
-        avg_attention_activations: NumPy array of average activations
-    """
-    num_layers, num_heads = avg_attention_activations.shape
+    return avg_layer_activations
 
-    plt.figure(figsize=(15, 8))
-    sns.heatmap(
-        avg_attention_activations, 
-        cmap='YlGnBu', 
-        annot=True, 
-        fmt='.4f',
-        xticklabels=[f'Head {i+1}' for i in range(num_heads)],
-        yticklabels=[f'Layer {i+1}' for i in range(num_layers)]
-    )
-    plt.title('Average Attention Activations Across HellaSwag Samples')
-    plt.xlabel('Attention Heads')
-    plt.ylabel('Model Layers')
+def visualize_layer_activation_magnitudes(avg_layer_activations):
+    """
+    Create a bar graph of average layer activation magnitudes.
+    """
+    plt.figure(figsize=(15, 6))
+    plt.bar(range(len(avg_layer_activations)), avg_layer_activations)
+    plt.title('Average Activation Magnitude Across Layers')
+    plt.xlabel('Layer Index')
+    plt.ylabel('Average Activation Magnitude')
+    plt.xticks(range(len(avg_layer_activations)), [f'Layer {i+1}' for i in range(len(avg_layer_activations))])
     plt.tight_layout()
     plt.show()
 
 # Prepare dataset
 tokenized_dataset = prepare_hellaswag_dataset(tokenizer, num_samples=100)
 
-# Compute and visualize average attention activations
-avg_attention_activations = compute_average_attention_activations(model, tokenized_dataset)
-visualize_attention_activations(avg_attention_activations)
+# Compute and visualize layer activation magnitudes
+avg_layer_activations = compute_layer_activation_magnitudes(model, tokenized_dataset)
+visualize_layer_activation_magnitudes(avg_layer_activations)
