@@ -114,7 +114,7 @@ class QuantizedLlamaModel(torch.nn.Module):
                 return grad
             param.register_hook(hook)
 
-    class QuantizedLlamaModel(torch.nn.Module):
+class QuantizedLlamaModel(torch.nn.Module):
     def __init__(self, base_model: torch.nn.Module, sf_quantizer: Superfloat):
         super(QuantizedLlamaModel, self).__init__()
         self.base_model = base_model
