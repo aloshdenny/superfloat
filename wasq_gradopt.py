@@ -114,30 +114,60 @@ class QuantizedLlamaModel(torch.nn.Module):
                 return grad
             param.register_hook(hook)
 
-    def forward(self, input_ids=None, attention_mask=None, **kwargs):
-        """Forward pass with quantization at each layer"""
-        # Quantize input tensors
-        input_ids, _ = self.sf_quantizer.tensor_quantize(input_ids)
-        attention_mask, _ = self.sf_quantizer.tensor_quantize(attention_mask)
+    class QuantizedLlamaModel(torch.nn.Module):
+    def __init__(self, base_model: torch.nn.Module, sf_quantizer: Superfloat):
+        super(QuantizedLlamaModel, self).__init__()
+        self.base_model = base_model
+        self.sf_quantizer = sf_quantizer
+        self.quantization_metrics = QuantizationMetrics()
+        self.adaptive_masks = nn.ModuleDict()
+        self.apply_gradient_hooks()
+        self.prepare_adaptive_masks()
 
-        # Apply quantization and adaptive masks to model weights
+    def prepare_adaptive_masks(self):
+        """Create adaptive quantization masks for each layer."""
+        for name, param in self.base_model.named_parameters():
+            if param.requires_grad:
+                self.adaptive_masks[name.replace('.', '_')] = AdaptiveQuantizationMask(param.size())
+
+    def apply_gradient_hooks(self):
+        """Apply quantization and gradient hooks to model parameters."""
+        for param in self.base_model.parameters():
+            def hook(grad, param=param):
+                # Track out-of-range parameters
+                _, out_of_range = self.sf_quantizer.tensor_quantize(param)
+                self.quantization_metrics.track(self, self.sf_quantizer)
+
+                # Adaptive gradient masking
+                grad = grad * out_of_range.to(grad.dtype)
+                return grad
+
+            param.register_hook(hook)
+
+    def forward(self, input_ids=None, attention_mask=None, **kwargs):
+        """
+        Forward pass with quantization at each layer and inputs quantization.
+        Args:
+            input_ids (torch.Tensor): Input IDs tensor.
+            attention_mask (torch.Tensor): Attention mask tensor.
+            **kwargs: Additional arguments for the underlying model.
+        """
+        # Quantize input tensors
+        if input_ids is not None:
+            input_ids, _ = self.sf_quantizer.tensor_quantize(input_ids)
+        if attention_mask is not None:
+            attention_mask, _ = self.sf_quantizer.tensor_quantize(attention_mask)
+
+        # Quantize weights in each layer
         for name, layer in self.base_model.named_children():
             if isinstance(layer, torch.nn.Linear):
                 mask_name = name.replace('.', '_')
-                layer.weight.data = layer.weight.data * self.adaptive_masks[mask_name](layer.weight.data)
+                if mask_name in self.adaptive_masks:
+                    layer.weight.data = layer.weight.data * self.adaptive_masks[mask_name](layer.weight.data)
                 layer.weight.data, _ = self.sf_quantizer.tensor_quantize(layer.weight.data)
 
-        # Forward through the base model
-        outputs = self.base_model.model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
-
-        # Process the lm_head explicitly if it exists
-        if hasattr(self.base_model, 'lm_head'):
-            logits = self.base_model.lm_head(outputs.last_hidden_state)
-            logits, _ = self.sf_quantizer.tensor_quantize(logits)
-        else:
-            raise KeyError("The base model does not contain 'lm_head'.")
-
-        return logits
+        # Forward pass through the base model
+        return self.base_model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
 
 
 def prepare_dataset(tokenizer, max_length=1024):
