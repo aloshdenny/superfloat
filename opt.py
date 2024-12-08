@@ -135,12 +135,6 @@ import gc
 import os
 import re
 
-class Superfloat:
-    # ... [Previous Superfloat implementation remains the same] ...
-
-class QuantizedLlamaModel(nn.Module):
-    # ... [Previous QuantizedLlamaModel implementation remains the same] ...
-
 def load_checkpoint(quantized_model, sf_bits, suffix="opt", device="cuda"):
     """
     Load the latest checkpoint based on the provided Superfloat bitwidth and filename suffix.
