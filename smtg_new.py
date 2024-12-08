@@ -1,205 +1,196 @@
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
-import seaborn as sns
 import numpy as np
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 from tqdm import tqdm
+import copy
 
-# Device setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# Load pre-trained model and tokenizer
-model_name = "Qwen/Qwen2-0.5B"
-
-# Load model
-model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir="./cache")
-model = model.to(device)
-model.eval()  # Set model to evaluation mode
-
-# Load tokenizer
-tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir="./cache")
-tokenizer.pad_token = tokenizer.eos_token
-
-def prepare_hellaswag_dataset(tokenizer, max_length=128, num_samples=None):
+class WASQ:
     """
-    Loads and tokenizes the HellaSwag dataset.
-    
-    Args:
-        tokenizer: Tokenizer to use for preparing the dataset.
-        max_length: Maximum token sequence length.
-        num_samples: Number of samples to select from the dataset.
+    Weight-Aware Selective Quantization (WASQ) class
+    """
+    def __init__(self, model, bits=11, activation_threshold=0.75):
+        """
+        Initialize WASQ with model and quantization parameters
         
-    Returns:
-        A tokenized dataset ready for processing.
-    """
-    # Load the HellaSwag dataset (validation split)
-    dataset = load_dataset("hellaswag", split="validation")
-    
-    # Optionally, select a subset of the dataset
-    if num_samples is not None:
-        dataset = dataset.select(range(min(num_samples, len(dataset))))
+        Args:
+            model: Base model to quantize
+            bits: Number of bits for quantization
+            activation_threshold: Percentile of activation magnitude to target
+        """
+        self.original_model = model
+        self.bits = bits
+        self.activation_threshold = activation_threshold
+        
+        # Quantization casting table
+        self.CASTING_TABLE = {
+            16: torch.float32,
+            15: torch.float32,
+            14: torch.float32,
+            13: torch.float32,
+            12: torch.float32,
+            11: torch.float16,
+            10: torch.float16,
+            9: torch.float16,
+            8: torch.bfloat16,
+            7: torch.bfloat16,
+            6: torch.bfloat16,
+            5: torch.bfloat16,
+            4: torch.bfloat16,
+        }
+        self.float_type = self.CASTING_TABLE[bits]
+        
+        # Prepare for selective quantization
+        self.layer_activations = None
+        self.targeted_layers = None
 
-    # Tokenize each example
+    def compute_layer_activation_magnitudes(self, tokenized_dataset):
+        """
+        Compute activation magnitudes for each layer across samples
+        """
+        layer_activations = []
+
+        def register_activation_hook(layers):
+            def hook(module, input, output):
+                if isinstance(output, torch.Tensor):
+                    layers.append(torch.abs(output).mean().item())
+            return hook
+
+        for tokenized_input in tqdm(tokenized_dataset, desc="Processing Samples"):
+            current_sample_layers = []
+            hooks = []
+            
+            for name, module in self.original_model.named_modules():
+                if 'transformer.layers' in name or 'model.layers' in name:
+                    hook = module.register_forward_hook(register_activation_hook(current_sample_layers))
+                    hooks.append(hook)
+            
+            with torch.no_grad():
+                input_ids = tokenized_input['input_ids'].squeeze(0)
+                attention_mask = tokenized_input['attention_mask'].squeeze(0)
+                self.original_model(input_ids=input_ids.unsqueeze(0), attention_mask=attention_mask.unsqueeze(0))
+            
+            for hook in hooks:
+                hook.remove()
+            
+            layer_activations.append(current_sample_layers)
+
+        # Compute average across all samples
+        self.layer_activations = np.mean(layer_activations, axis=0)
+        return self.layer_activations
+
+    def select_targeted_layers(self):
+        """
+        Select layers for targeted quantization based on activation magnitude
+        """
+        if self.layer_activations is None:
+            raise ValueError("Layer activations not computed. Run compute_layer_activation_magnitudes first.")
+        
+        # Calculate activation threshold
+        threshold = np.percentile(self.layer_activations, 
+                                  (1 - self.activation_threshold) * 100)
+        
+        # Select layers above the threshold
+        self.targeted_layers = np.where(self.layer_activations >= threshold)[0]
+        
+        return self.targeted_layers
+
+    def visualize_layer_activations(self):
+        """
+        Visualize layer activation magnitudes
+        """
+        if self.layer_activations is None:
+            raise ValueError("Layer activations not computed.")
+        
+        plt.figure(figsize=(15, 6))
+        plt.bar(range(len(self.layer_activations)), self.layer_activations)
+        plt.title('Layer Activation Magnitudes')
+        plt.xlabel('Layer Index')
+        plt.ylabel('Activation Magnitude')
+        plt.xticks(range(len(self.layer_activations)), 
+                   [f'Layer {i+1}' for i in range(len(self.layer_activations))])
+        
+        # Highlight targeted layers
+        if self.targeted_layers is not None:
+            for layer in self.targeted_layers:
+                plt.bar(layer, self.layer_activations[layer], color='red', alpha=0.7)
+        
+        plt.tight_layout()
+        plt.show()
+
+    def quantize_model(self, model):
+        """
+        Selectively quantize model layers based on activation magnitudes
+        """
+        quantized_model = copy.deepcopy(model)
+        
+        for name, param in quantized_model.named_parameters():
+            # Extract layer index from parameter name
+            try:
+                layer_idx = int(name.split('.')[2])
+            except:
+                continue
+            
+            # Quantize only targeted layers
+            if layer_idx in self.targeted_layers:
+                # Implement your quantization logic here
+                param.data = param.data.to(self.float_type)
+                # You can add more sophisticated quantization here
+        
+        return quantized_model
+
+def prepare_dataset(tokenizer, max_length=128, num_samples=100):
+    """
+    Prepare dataset for analysis
+    """
+    dataset = load_dataset("hellaswag", split="validation")
+    dataset = dataset.select(range(min(num_samples, len(dataset))))
+
     def tokenize_example(example):
         return tokenizer(
-            example['ctx'],  # Use the context field from the dataset
+            example['ctx'],
             max_length=max_length,
             truncation=True,
             padding="max_length",
             return_tensors="pt"
         )
 
-    # Apply tokenization to all examples
     tokenized_dataset = [tokenize_example(entry) for entry in tqdm(dataset, desc="Tokenizing HellaSwag")]
 
     return tokenized_dataset
 
-def compute_layer_activation_magnitudes(model, tokenized_dataset):
-    """
-    Computes the average activation magnitude for each layer across all samples.
-    
-    Args:
-        model: Pre-trained model.
-        tokenized_dataset: Tokenized input dataset.
-        
-    Returns:
-        A list of average activation magnitudes for each layer.
-    """
-    layer_activations = []
+def main():
+    # Initialize model and tokenizer
+    model_name = "Qwen/Qwen2-0.5B"
+    model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir="./cache", token='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')
+    tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir="./cache", token='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')
+    tokenizer.pad_token = tokenizer.eos_token
 
-    def register_activation_hook(layers):
-        def hook(module, input, output):
-            # Capture the mean absolute activation magnitude
-            if isinstance(output, torch.Tensor):
-                layers.append(torch.abs(output).mean().item())
-        return hook
+    # Prepare dataset
+    tokenized_dataset = prepare_dataset(tokenizer)
 
-    for tokenized_input in tqdm(tokenized_dataset, desc="Processing Samples"):
-        # Reset activations for the current sample
-        current_sample_layers = []
-        
-        # Register hooks for transformer layers
-        hooks = []
-        for name, module in model.named_modules():
-            if 'transformer.layers' in name or 'model.layers' in name:  # Identify transformer layers
-                hook = module.register_forward_hook(register_activation_hook(current_sample_layers))
-                hooks.append(hook)
-        
-        # Perform forward pass
-        with torch.no_grad():
-            input_ids = tokenized_input['input_ids'].squeeze(0).to(device)
-            attention_mask = tokenized_input['attention_mask'].squeeze(0).to(device)
-            model(input_ids=input_ids.unsqueeze(0), attention_mask=attention_mask.unsqueeze(0))
-        
-        # Remove hooks
-        for hook in hooks:
-            hook.remove()
-        
-        # Store layer activations for this sample
-        layer_activations.append(current_sample_layers)
+    # Initialize WASQ
+    wasq = WASQ(model, bits=11, activation_threshold=0.75)
 
-    # Compute the average activation magnitude across all samples
-    avg_layer_activations = np.mean(layer_activations, axis=0)
-    
-    return avg_layer_activations
+    # Compute layer activations
+    layer_activations = wasq.compute_layer_activation_magnitudes(tokenized_dataset)
 
-def visualize_layer_activation_magnitudes(avg_layer_activations):
-    """
-    Creates a bar graph of average layer activation magnitudes.
-    
-    Args:
-        avg_layer_activations: List of average activation magnitudes per layer.
-    """
-    plt.figure(figsize=(15, 6))
-    plt.bar(range(len(avg_layer_activations)), avg_layer_activations, color='b', alpha=0.6)
-    plt.title("Average Activation Magnitude Across Layers")
-    plt.xlabel("Layer Index")
-    plt.ylabel("Average Activation Magnitude")
-    plt.xticks(range(len(avg_layer_activations)), [f"Layer {i+1}" for i in range(len(avg_layer_activations))])
-    plt.tight_layout()
-    plt.show()
+    # Select targeted layers
+    targeted_layers = wasq.select_targeted_layers()
+    print("Targeted Layers:", targeted_layers)
 
-def extract_inter_layer_attention_maps(model, tokenized_dataset):
-    """
-    Extracts inter-layer attention maps for all layers across samples.
-    
-    Args:
-        model: Pre-trained model.
-        tokenized_dataset: Tokenized input dataset.
-        
-    Returns:
-        A list of attention maps for all layers and samples.
-    """
-    attention_maps = []
+    # Visualize layer activations
+    wasq.visualize_layer_activations()
 
-    def register_attention_hook(attention_outputs):
-        def hook(module, inputs, outputs):
-            # Store attention weights
-            if isinstance(outputs, tuple):
-                attention_outputs.append(outputs[0].detach().cpu())  # Attention maps often at index 0
-        return hook
+    # Quantize model
+    quantized_model = wasq.quantize_model(model)
 
-    for tokenized_input in tqdm(tokenized_dataset, desc="Processing Samples for Attention Maps"):
-        current_sample_attentions = []
-        
-        # Register hooks for attention layers
-        hooks = []
-        for name, module in model.named_modules():
-            if 'attention' in name.lower():  # Identify attention layers
-                hook = module.register_forward_hook(register_attention_hook(current_sample_attentions))
-                hooks.append(hook)
-        
-        # Perform forward pass
-        with torch.no_grad():
-            input_ids = tokenized_input['input_ids'].squeeze(0).to(device)
-            attention_mask = tokenized_input['attention_mask'].squeeze(0).to(device)
-            model(input_ids=input_ids.unsqueeze(0), attention_mask=attention_mask.unsqueeze(0))
-        
-        # Remove hooks
-        for hook in hooks:
-            hook.remove()
-        
-        # Store attention maps for this sample
-        attention_maps.append(current_sample_attentions)
+    return quantized_model
 
-    return attention_maps
-
-def visualize_attention_heatmaps(attention_maps, tokenized_input, layer_idx=0):
-    """
-    Visualizes attention heatmaps for a specific layer.
-    
-    Args:
-        attention_maps: List of attention maps for all layers.
-        tokenized_input: Tokenized input for a specific sample.
-        layer_idx: Index of the layer to visualize.
-    """
-    input_tokens = tokenizer.convert_ids_to_tokens(tokenized_input['input_ids'].squeeze(0).tolist())
-    attention_map = attention_maps[0][layer_idx].squeeze(0)  # [Batch, Heads, Tokens, Tokens]
-    
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(
-        attention_map.mean(dim=0),  # Average across heads
-        xticklabels=input_tokens,
-        yticklabels=input_tokens,
-        cmap="viridis"
-    )
-    plt.title(f"Attention Map for Layer {layer_idx + 1}")
-    plt.xlabel("Input Tokens")
-    plt.ylabel("Output Tokens")
-    plt.show()
-
-# Prepare the dataset
-tokenized_dataset = prepare_hellaswag_dataset(tokenizer, num_samples=50)
-
-# Compute and visualize activation magnitudes
-avg_layer_activations = compute_layer_activation_magnitudes(model, tokenized_dataset)
-visualize_layer_activation_magnitudes(avg_layer_activations)
-
-# Extract and visualize attention maps
-attention_maps = extract_inter_layer_attention_maps(model, tokenized_dataset)
-for i, tokenized_input in enumerate(tokenized_dataset[:5]):  # Limit to first 5 samples for visualization
-    print(f"Sample {i + 1}: Visualizing attention heatmaps...")
-    visualize_attention_heatmaps(attention_maps[i], tokenized_input, layer_idx=0)  # Visualize Layer 1
+if __name__ == "__main__":
+    main()
