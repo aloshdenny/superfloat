@@ -72,6 +72,10 @@ class Superfloat:
         
         return decoded, out_of_range
 
+import torch
+import torch.nn as nn
+from transformers import LlamaForCausalLM
+
 class QuantizedLlamaModel(nn.Module):
     def __init__(self, base_model: LlamaForCausalLM, sf_quantizer):
         super().__init__()
@@ -103,9 +107,11 @@ class QuantizedLlamaModel(nn.Module):
         Forward method that matches the original LlamaForCausalLM forward signature
         and applies Superfloat quantization.
         """
-        # Quantize input_ids if provided
+        # Ensure input_ids is long tensor for embedding layer
         if input_ids is not None:
-            input_ids, _ = self.sf_quantizer.tensor_quantize(input_ids.float())
+            # Convert to float for quantization, then back to long
+            input_ids_float, _ = self.sf_quantizer.tensor_quantize(input_ids.float())
+            input_ids = input_ids_float.long()
 
         # If inputs_embeds is provided, quantize it
         if inputs_embeds is not None:
