@@ -73,42 +73,71 @@ class Superfloat:
         return decoded, out_of_range
 
 class QuantizedLlamaModel(nn.Module):
-    def __init__(self, base_model: nn.Module, sf_quantizer: Superfloat):
+    def __init__(self, base_model: LlamaForCausalLM, sf_quantizer):
         super().__init__()
         self.base_model = base_model
         self.sf_quantizer = sf_quantizer
-        self.apply_quantization_hooks()
+        
+        # Quantize model parameters during initialization
+        self.quantize_model_parameters()
 
-    def apply_quantization_hooks(self):
-        """Apply Superfloat quantization hooks to model parameters."""
+    def quantize_model_parameters(self):
+        """Quantize all model parameters during initialization."""
         for name, param in self.base_model.named_parameters():
-            if 'weight' in name or 'bias' in name:
-                # In-place quantization of parameters
+            if param.requires_grad:
                 quantized_param, _ = self.sf_quantizer.tensor_quantize(param.data)
                 param.data.copy_(quantized_param)
 
-    def forward(self, x):
-        """Quantize inputs and intermediate activations during forward pass."""
-        # Quantize input
-        x, _ = self.sf_quantizer.tensor_quantize(x)
+    def forward(
+        self, 
+        input_ids=None, 
+        attention_mask=None, 
+        past_key_values=None, 
+        inputs_embeds=None,
+        labels=None,
+        use_cache=None,
+        return_dict=None,
+        **kwargs
+    ):
+        """
+        Forward method that matches the original LlamaForCausalLM forward signature
+        and applies Superfloat quantization.
+        """
+        # Quantize input_ids if provided
+        if input_ids is not None:
+            input_ids, _ = self.sf_quantizer.tensor_quantize(input_ids.float())
 
-        # Quantize each layer's computations
-        for layer in self.base_model.children():
-            if isinstance(layer, nn.Linear):
-                # Quantize layer weights
-                layer.weight.data, _ = self.sf_quantizer.tensor_quantize(layer.weight.data)
-                
-                # If layer has bias, quantize bias
-                if layer.bias is not None:
-                    layer.bias.data, _ = self.sf_quantizer.tensor_quantize(layer.bias.data)
-            
-            # Forward pass through layer
-            x = layer(x)
-            
-            # Quantize activations
-            x, _ = self.sf_quantizer.tensor_quantize(x)
-        
-        return x
+        # If inputs_embeds is provided, quantize it
+        if inputs_embeds is not None:
+            inputs_embeds, _ = self.sf_quantizer.tensor_quantize(inputs_embeds)
+
+        # Perform forward pass on the base model
+        outputs = self.base_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            use_cache=use_cache,
+            return_dict=return_dict,
+            **kwargs
+        )
+
+        # Quantize logits if they exist
+        if hasattr(outputs, 'logits') and outputs.logits is not None:
+            outputs.logits, _ = self.sf_quantizer.tensor_quantize(outputs.logits)
+
+        return outputs
+
+    def __getattr__(self, name):
+        """
+        Delegate attribute access to the base model to maintain 
+        compatibility with original model methods.
+        """
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.base_model, name)
 
 # Main script remains largely the same, but use the improved QuantizedLlamaModel
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -118,7 +147,7 @@ print(f"Using device: {device}")
 sf = Superfloat(bits=11)  # 11-bit Superfloat 
 
 # Load model
-model_name = "meta-llama/Llama-3.2-1B"
+model_name = "Qwen/Qwen2-0.5B"
 model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
 model = model.to(sf.float_type).to(device)
 
@@ -237,7 +266,7 @@ def main():
     sf = Superfloat(bits=11)  # Configurable bit-width
 
     # Model and Tokenizer Setup
-    model_name = "meta-llama/Llama-3.2-1B"
+    model_name = "Qwen/Qwen2-0.5B"
     
     try:
         model = LlamaForCausalLM.from_pretrained(
