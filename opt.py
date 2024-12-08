@@ -145,20 +145,20 @@ class QuantizedLlamaModel(nn.Module):
         except AttributeError:
             return getattr(self.base_model, name)
 
-# Main script remains largely the same, but use the improved QuantizedLlamaModel
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+# # Main script remains largely the same, but use the improved QuantizedLlamaModel
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# print(f"Using device: {device}")
 
-# Superfloat configuration
-sf = Superfloat(bits=11)  # 11-bit Superfloat 
+# # Superfloat configuration
+# sf = Superfloat(bits=11)  # 11-bit Superfloat 
 
-# Load model
-model_name = "Qwen/Qwen2-0.5B"
-model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
-model = model.to(sf.float_type).to(device)
+# # Load model
+# model_name = "Qwen/Qwen2-0.5B"
+# model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
+# model = model.to(sf.float_type).to(device)
 
-# Wrap model with Quantized Wrapper
-quantized_model = QuantizedLlamaModel(model, sf)
+# # Wrap model with Quantized Wrapper
+# quantized_model = QuantizedLlamaModel(model, sf)
 
 import torch
 import torch.nn as nn
