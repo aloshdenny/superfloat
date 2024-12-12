@@ -1,5 +1,5 @@
 import torch
-from transformers import LlamaForCausalLM, PreTrainedTokenizerFast
+from transformers import AutoModelForCausalLM
 
 class Superfloat:
     CASTING_TABLE = {
@@ -70,11 +70,11 @@ def check_model_quantization(model, sf_type):
     return all_parameters_valid
 
 # Load model
-model_name = "meta-llama/Llama-3.2-1B"
+model_name = "Qwen/Qwen2-0.5B"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-model = LlamaForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
+model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
 model = model.to(sf.float_type).to(device)  # Ensure model uses the correct float type
 
 # Quantize parameters

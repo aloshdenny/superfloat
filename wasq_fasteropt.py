@@ -6,6 +6,8 @@ from datasets import load_dataset, Dataset
 from tqdm import tqdm
 import gc
 
+max_length = 8
+
 class Superfloat:
     CASTING_TABLE = {
         16: torch.float32,
@@ -162,7 +164,7 @@ torch.cuda.empty_cache()
 gc.collect()
 
 # Prepare Dataset
-def prepare_dataset(tokenizer, max_length=1024):
+def prepare_dataset(tokenizer, max_length=1):
     dataset = Dataset.from_parquet('train.parquet')
     def tokenize_function(examples):
         return tokenizer(
@@ -182,7 +184,7 @@ def collate_fn(batch):
     return {'input_ids': input_ids, 'attention_mask': attention_mask}
 
 # Prepare tokenized dataset and dataloader
-tokenized_dataset = prepare_dataset(tokenizer)
+tokenized_dataset = prepare_dataset(tokenizer, max_length=max_length)
 train_dataloader = DataLoader(tokenized_dataset, batch_size=1, shuffle=True, collate_fn=collate_fn)
 
 # Optimizer and Loss
