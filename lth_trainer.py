@@ -1,8 +1,13 @@
 import torch
+import torch.nn as nn
+import torch.optim as optim
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from torch.utils.data import DataLoader
+from datasets import load_dataset, Dataset
+from tqdm import tqdm
+import gc
+import os
 import numpy as np
-from transformers import AutoModelForCausalLM
-from typing import Dict, List
-import matplotlib.pyplot as plt
 import copy
 
 class Superfloat:
@@ -49,230 +54,261 @@ class Superfloat:
         decoded_tensor = self.decode(encoded_tensor)
         return decoded_tensor
 
-class ActivationMagnitudeAnalyzer:
-    def __init__(self, model, sf_type):
+class LotteryTicketTrainer:
+    def __init__(self, model, sf_quantizer, tokenizer, config):
         """
-        Initialize the activation magnitude analyzer
+        Initialize LTH training environment
         
         Args:
-            model: Transformer model to analyze
-            sf_type: Superfloat quantization object
+            model: Pre-trained transformer model
+            sf_quantizer: Superfloat quantization object
+            tokenizer: Model tokenizer
+            config: Training configuration dictionary
         """
-        self.model = model
-        self.sf_type = sf_type
-        self.original_activations = {}
-        self.quantized_activations = {}
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = model.to(self.device)
+        self.sf_quantizer = sf_quantizer
+        self.tokenizer = tokenizer
+        self.config = config
         
-        # Hook to capture layer activations
-        self.hooks = []
+        # LTH specific attributes
+        self.original_model_state = copy.deepcopy(self.model.state_dict())
+        self.winning_tickets = {}
+        self.pruning_rate = config.get('pruning_rate', 0.2)
+        self.pruning_iterations = config.get('pruning_iterations', 3)
         
-    def register_activation_hooks(self, model):
+        # Optimizer and loss
+        self.optimizer = optim.Adam(
+            self.model.parameters(), 
+            lr=config.get('learning_rate', 1e-5), 
+            eps=config.get('optimizer_eps', 1e-4)
+        )
+        self.loss_fn = nn.CrossEntropyLoss()
+        
+    def prepare_dataset(self, max_length=2):
         """
-        Register forward hooks to capture activations for each layer
+        Prepare and tokenize dataset
         
         Args:
-            model: Model to register hooks on
-        """
-        def hook_fn(module, input, output, layer_name):
-            # Handle different output types
-            if hasattr(output, 'last_hidden_state'):
-                # For models returning BaseModelOutputWithPast or similar
-                output = output.last_hidden_state
-            elif isinstance(output, tuple):
-                # Take the first tensor if output is a tuple
-                output = output[0]
-            
-            # Ensure output is a tensor
-            if not isinstance(output, torch.Tensor):
-                print(f"Warning: Unexpected output type for {layer_name}: {type(output)}")
-                return 0.0
-            
-            # Compute average magnitude of activations
-            avg_magnitude = torch.abs(output).mean().item()
-            return avg_magnitude
+            max_length: Maximum sequence length
         
-        def register_hook(module, prefix=''):
-            for name, child_module in module.named_children():
-                full_name = f"{prefix}.{name}" if prefix else name
+        Returns:
+            Tokenized dataset
+        """
+        dataset = Dataset.from_parquet('train.parquet')
+        
+        def tokenize_function(examples):
+            return self.tokenizer(
+                examples["text"],
+                truncation=True,
+                max_length=max_length,
+                padding="max_length",
+                return_tensors="pt"
+            )
+        
+        tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset.column_names)
+        return tokenized_dataset
+    
+    def create_dataloader(self, dataset, batch_size=4):
+        """
+        Create DataLoader for training
+        
+        Args:
+            dataset: Tokenized dataset
+            batch_size: Batch size for training
+        
+        Returns:
+            DataLoader
+        """
+        def collate_fn(batch):
+            input_ids = torch.stack([torch.tensor(example['input_ids']) for example in batch])
+            attention_mask = torch.stack([torch.tensor(example['attention_mask']) for example in batch])
+            return {'input_ids': input_ids, 'attention_mask': attention_mask}
+        
+        return DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            shuffle=True, 
+            collate_fn=collate_fn
+        )
+    
+    def magnitude_based_pruning(self):
+        """
+        Perform magnitude-based pruning across model layers
+        
+        Returns:
+            Dictionary of pruned masks for each layer
+        """
+        pruning_masks = {}
+        
+        for name, param in self.model.named_parameters():
+            if len(param.shape) > 1:  # Only prune weight matrices
+                # Get absolute values of weights
+                weight_abs = torch.abs(param.data)
                 
-                # Add hook for specific layer types or all layers
-                hook = child_module.register_forward_hook(
-                    lambda module, input, output, name=full_name: 
-                    self.original_activations.update({name: hook_fn(module, input, output, name)})
+                # Flatten weights for global pruning
+                flat_weights = weight_abs.view(-1)
+                
+                # Compute pruning threshold
+                k = int(flat_weights.numel() * self.pruning_rate)
+                threshold = torch.topk(flat_weights, k, largest=False).values.max()
+                
+                # Create pruning mask
+                mask = (weight_abs > threshold).float()
+                pruning_masks[name] = mask
+                
+                # Apply pruning in-place
+                param.data *= mask
+        
+        return pruning_masks
+    
+    def reset_to_winning_ticket(self, pruning_masks):
+        """
+        Reset model to winning ticket initialization
+        
+        Args:
+            pruning_masks: Dictionary of pruning masks
+        """
+        for name, param in self.model.named_parameters():
+            if name in pruning_masks:
+                # Reset weights, preserving pruning mask
+                mask = pruning_masks[name]
+                original_init = self.original_model_state[name]
+                param.data = original_init * mask
+    
+    def train(self):
+        """
+        Main training loop with Lottery Ticket Hypothesis principles
+        """
+        # Prepare dataset
+        tokenized_dataset = self.prepare_dataset()
+        dataloader = self.create_dataloader(tokenized_dataset)
+        
+        # Training parameters
+        num_epochs = self.config.get('num_epochs', 3)
+        accumulation_steps = self.config.get('accumulation_steps', 32)
+        best_loss = float('inf')
+        
+        for iteration in range(self.pruning_iterations):
+            print(f"\nPruning Iteration {iteration + 1}/{self.pruning_iterations}")
+            
+            for epoch in range(num_epochs):
+                self.model.train()
+                epoch_loss = 0.0
+                
+                epoch_iterator = tqdm(
+                    enumerate(dataloader), 
+                    total=len(dataloader), 
+                    desc=f"Iteration {iteration + 1}, Epoch {epoch + 1}"
                 )
-                self.hooks.append(hook)
                 
-                # Recursively register hooks for nested modules
-                register_hook(child_module, full_name)
-        
-        register_hook(model)
-    
-    def analyze_activations(self, input_data):
-        """
-        Analyze activation magnitudes for original and quantized models
-        
-        Args:
-            input_data: Sample input for the model
-        """
-        # Clear previous hooks and activations
-        for hook in self.hooks:
-            hook.remove()
-        self.hooks.clear()
-        self.original_activations.clear()
-        self.quantized_activations.clear()
-        
-        # Original model analysis
-        self.register_activation_hooks(self.model)
-        with torch.no_grad():
-            _ = self.model(input_data)
-        original_dict = self.original_activations.copy()
-        
-        # Quantize model
-        quantized_model = self.quantize_model(self.model)
-        
-        # Quantized model analysis
-        self.register_activation_hooks(quantized_model)
-        with torch.no_grad():
-            _ = quantized_model(input_data)
-        quantized_dict = self.original_activations.copy()
-        
-        self.original_activations = original_dict
-        self.quantized_activations = quantized_dict
-    
-    def quantize_model(self, model):
-        """
-        Quantize the model using Superfloat
-        
-        Args:
-            model: Model to quantize
-        
-        Returns:
-            Quantized model
-        """
-        model = model.to(self.sf_type.float_type).to(self.model.device)
-        
-        for name, param in model.named_parameters():
-            with torch.no_grad():
-                quantized_param = self.sf_type.tensor_quantize(param)
-                param.data.copy_(quantized_param)
-        return model
-    
-    def compare_activations(self):
-        """
-        Compare activation magnitudes between original and quantized models
-        
-        Returns:
-            Dictionary of activation magnitude differences
-        """
-        magnitude_diff = {}
-        all_layers = set(list(self.original_activations.keys()) + 
-                         list(self.quantized_activations.keys()))
-        
-        for layer in all_layers:
-            orig = self.original_activations.get(layer, 0)
-            quant = self.quantized_activations.get(layer, 0)
-            diff = abs(orig - quant)
-            relative_change = (diff / (orig + 1e-8)) * 100
+                for step, batch in epoch_iterator:
+                    # Move batch to device
+                    input_ids = batch['input_ids'].to(self.device)
+                    attention_mask = batch['attention_mask'].to(self.device)
+                    
+                    # Forward pass
+                    outputs = self.model(
+                        input_ids=input_ids, 
+                        attention_mask=attention_mask
+                    )
+                    logits = outputs.logits
+                    
+                    # Prepare targets
+                    target = input_ids[:, 1:].contiguous()
+                    logits = logits[:, :-1].contiguous()
+                    
+                    # Calculate loss
+                    loss = self.loss_fn(
+                        logits.view(-1, logits.size(-1)), 
+                        target.view(-1)
+                    ) / accumulation_steps
+                    
+                    # Backward pass
+                    loss.backward()
+                    
+                    # Accumulate loss
+                    epoch_loss += loss.item() * accumulation_steps
+                    
+                    if (step + 1) % accumulation_steps == 0:
+                        # Clamp parameters within Superfloat range
+                        for param in self.model.parameters():
+                            param.data = torch.clamp(
+                                param.data, 
+                                min=-self.sf_quantizer.max_val, 
+                                max=self.sf_quantizer.max_val
+                            )
+                        
+                        # Gradient clipping
+                        torch.nn.utils.clip_grad_value_(
+                            self.model.parameters(), 
+                            clip_value=self.sf_quantizer.max_val
+                        )
+                        
+                        # Optimizer step
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
+                        
+                        epoch_iterator.set_postfix({
+                            "Loss": f"{loss.item() * accumulation_steps:.4f}"
+                        })
+                
+                # Calculate average epoch loss
+                epoch_loss /= len(dataloader)
+                print(f"Epoch {epoch + 1} Loss: {epoch_loss:.4f}")
+                
+                # Save best model
+                if epoch_loss < best_loss:
+                    best_loss = epoch_loss
+                    torch.save(
+                        self.model.state_dict(), 
+                        f"sf{self.sf_quantizer.bits}_iteration{iteration+1}_epoch{epoch+1}_best.pth"
+                    )
             
-            magnitude_diff[layer] = {
-                'original': orig,
-                'quantized': quant,
-                'absolute_diff': diff,
-                'relative_change_percent': relative_change
-            }
-        
-        return magnitude_diff
-    
-    def cluster_layers_by_deviation(self, magnitude_diff, threshold_percent=10):
-        """
-        Cluster layers based on activation magnitude deviation
-        
-        Args:
-            magnitude_diff: Dictionary of magnitude differences
-            threshold_percent: Percentage threshold for significant deviation
-        
-        Returns:
-            Clustered layers
-        """
-        significant_layers = {
-            'high_deviation': [],
-            'moderate_deviation': [],
-            'low_deviation': []
-        }
-        
-        for layer, stats in magnitude_diff.items():
-            if stats['relative_change_percent'] > threshold_percent:
-                significant_layers['high_deviation'].append(layer)
-            elif stats['relative_change_percent'] > threshold_percent / 2:
-                significant_layers['moderate_deviation'].append(layer)
-            else:
-                significant_layers['low_deviation'].append(layer)
-        
-        return significant_layers
-    
-    def visualize_activation_deviations(self, magnitude_diff):
-        """
-        Create visualization of activation magnitude deviations
-        
-        Args:
-            magnitude_diff: Dictionary of magnitude differences
-        """
-        layers = list(magnitude_diff.keys())
-        relative_changes = [magnitude_diff[layer]['relative_change_percent'] for layer in layers]
-        
-        plt.figure(figsize=(15, 6))
-        plt.bar(layers, relative_changes)
-        plt.title(f'Relative Activation Magnitude Change (SF{self.sf_type.bits})')
-        plt.xlabel('Layers')
-        plt.ylabel('Relative Change (%)')
-        plt.xticks(rotation=90, fontsize=8)
-        plt.tight_layout()
-        plt.savefig(f'activation_deviation_sf{self.sf_type.bits}.png')
-        plt.close()
+            # Perform pruning after each iteration
+            pruning_masks = self.magnitude_based_pruning()
+            self.reset_to_winning_ticket(pruning_masks)
+            
+            # Save winning ticket for this iteration
+            torch.save(
+                self.model.state_dict(), 
+                f"sf{self.sf_quantizer.bits}_winning_ticket_iteration{iteration+1}.pth"
+            )
 
 def main():
-    # Superfloat setup
-    sf = Superfloat(8)  # 8-bit quantization
-
-    # Model and device setup
+    # Superfloat configuration
+    sf = Superfloat(11)  # 11-bit quantization
+    
+    # Model and tokenizer setup
     model_name = "Qwen/Qwen2-0.5B"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    # Load model
+    
     model = AutoModelForCausalLM.from_pretrained(
         model_name, 
         cache_dir='./', 
         token='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'
     )
     model = model.to(sf.float_type).to(device)
-
-    # Prepare input data (replace with your actual input generation)
-    input_data = torch.randint(0, model.config.vocab_size, (1, 128), device=device)
-
-    # Initialize and run analyzer
-    analyzer = ActivationMagnitudeAnalyzer(model, sf)
-    analyzer.analyze_activations(input_data)
-
-    # Compare activations
-    magnitude_diff = analyzer.compare_activations()
-
-    # Cluster layers
-    clustered_layers = analyzer.cluster_layers_by_deviation(magnitude_diff)
-
-    # Visualize deviations
-    analyzer.visualize_activation_deviations(magnitude_diff)
-
-    # Print detailed results
-    print("\nLayer Activation Magnitude Differences:")
-    for layer, stats in magnitude_diff.items():
-        print(f"{layer}: Original={stats['original']:.4f}, "
-              f"Quantized={stats['quantized']:.4f}, "
-              f"Relative Change={stats['relative_change_percent']:.2f}%")
-
-    print("\nClustered Layers:")
-    for cluster, layers in clustered_layers.items():
-        print(f"{cluster.replace('_', ' ').title()}: {len(layers)} layers")
+    
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, 
+        cache_dir='./', 
+        token='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'
+    )
+    tokenizer.pad_token = tokenizer.eos_token
+    
+    # Training configuration
+    config = {
+        'learning_rate': 1e-5,
+        'num_epochs': 3,
+        'accumulation_steps': 32,
+        'pruning_rate': 0.2,
+        'pruning_iterations': 3
+    }
+    
+    # Initialize and run trainer
+    trainer = LotteryTicketTrainer(model, sf, tokenizer, config)
+    trainer.train()
 
 if __name__ == "__main__":
     main()
