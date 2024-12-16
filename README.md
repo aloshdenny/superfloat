@@ -1,6 +1,6 @@
 ---
 
-# **WASQ Repository: Superfloat Quantization and LTH Implementation**
+# **SuperFloat: Accelerators for AI on Edge. Reimagined.**
 
 This repository contains the code, methods, and scripts for implementing **Superfloat Quantization** and **Lottery Ticket Hypothesis (LTH)** techniques for optimizing neural networks. The repository focuses on various quantization algorithms, model evaluations, and fine-tuning techniques to minimize perplexity and stabilize activations.
 
