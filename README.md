@@ -4,6 +4,61 @@
 
 This repository contains the code, methods, and scripts for implementing **Superfloat Quantization** and **Lottery Ticket Hypothesis (LTH)** techniques for optimizing neural networks. The repository focuses on various quantization algorithms, model evaluations, and fine-tuning techniques to minimize perplexity and stabilize activations.
 
+Here’s an updated description for **Superfloat** and **WASQ** that you can wedge into the README. I’ve explained them in detail based on the whitepaper and PoC documents.
+
+---
+
+## **What is Superfloat?**  
+
+**Superfloat** is a custom quantization algorithm that operates with a **scalable precision format**. Unlike traditional floating-point systems (e.g., IEEE-754), Superfloat removes the mantissa entirely and focuses solely on the **exponent** for precision representation.  
+
+### **Key Features**:  
+1. **Sign-Exponent Representation**:  
+   - Superfloat (SFx) uses `1 bit` for the **sign** and allocates the remaining `x-1 bits` for the **exponent**.  
+   - For instance, in **SF16**:  
+     - 1 bit → Sign  
+     - 15 bits → Exponent  
+
+2. **Clamping Range**:  
+   - All values are clamped within the range `[-1, 1]`. This ensures activation and parameter stability, reducing the likelihood of exploding or vanishing gradients.
+
+3. **Bit-width Flexibility**:  
+   - Superfloat supports variable precision formats, scaling between **3-bit and 16-bit**:  
+     - Lower precision (e.g., **SF4**) → Faster computation, reduced model size.  
+     - Higher precision (e.g., **SF16**) → Improved accuracy while maintaining efficient quantization.
+
+4. **Gradient and Activation Capping**:  
+   - To stabilize the training process, gradients and activations are **capped** at -1 and +1.
+
+### **Advantages of Superfloat**:  
+- Saves **precision** without a significant drop in accuracy.  
+- Reduces **computational complexity** compared to traditional floating-point representations.  
+- Allows adaptive scaling for diverse quantization requirements.
+
+---
+
+## **What is WASQ?**  
+
+**WASQ** stands for **Weight and Activation Superfloat Quantization**. It is a **hybrid quantization framework** that leverages Superfloat precision to optimize both model weights and activations.
+
+### **Key Characteristics of WASQ**:  
+1. **Weight Quantization**:  
+   - Model weights are converted to **Superfloat precision** (SFx) without requiring complex computations like mantissa adjustments.  
+
+2. **Activation Quantization**:  
+   - Activations are clamped and quantized within a stable range to prevent issues such as exploding activations.
+
+3. **Optimization Algorithms**:  
+   - WASQ includes customized algorithms like **WASQ OPT** and **Full Parameter Method (FPM)** to balance accuracy and convergence speed.
+
+4. **Scalability**:  
+   - WASQ supports **multi-bit quantization** (from 4-bit to 16-bit), making it adaptable for different deployment environments, such as:  
+     - **Edge devices** → Lower precision for speed and memory savings.  
+     - **Servers** → Higher precision for accuracy-sensitive tasks.
+
+### **WASQ + Lottery Ticket Hypothesis (LTH)**  
+WASQ integrates **LTH** to identify specific weights that are critical for maintaining model performance after quantization. By fine-tuning only the **essential weights**, WASQ reduces computational overhead while achieving high accuracy.
+
 ---
 
 ## **Files Overview**
