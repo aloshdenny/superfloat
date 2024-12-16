@@ -1,5 +1,3 @@
-Here's the **README** for your repository, with hyperlinks and explanations integrated for clarity.
-
 ---
 
 # **WASQ Repository: Superfloat Quantization and LTH Implementation**
