@@ -4,8 +4,6 @@
 
 This repository contains the code, methods, and scripts for implementing **Superfloat Quantization** and **Lottery Ticket Hypothesis (LTH)** techniques for optimizing neural networks. The repository focuses on various quantization algorithms, model evaluations, and fine-tuning techniques to minimize perplexity and stabilize activations.
 
-Here’s an updated description for **Superfloat** and **WASQ** that you can wedge into the README. I’ve explained them in detail based on the whitepaper and PoC documents.
-
 ---
 
 ## **What is Superfloat?**  
@@ -186,5 +184,3 @@ Contributions are welcome! Feel free to open issues or submit pull requests.
 This project is licensed under the MIT License.
 
 ---
-
-Let me know if you'd like to tweak or add more sections! 🚀
