@@ -13,7 +13,7 @@ image = (
     .apt_install("gcc", "python3-dev")  # Add necessary system libraries if needed
 )
 
-app = modal.App("superfloat16-qwen")
+app = modal.App("qwen-sf16-experimental")
 
 # Define the function that runs the script
 # @app.function(gpu=modal.gpu.A100(size="80GB"), image=image, timeout=86400)
@@ -28,32 +28,52 @@ def train_and_upload():
     from datasets import Dataset
     from torch.utils.data import DataLoader
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    import pandas as pd
 
-    # URL of the dataset
-    url = "https://huggingface.co/datasets/EleutherAI/the_pile_deduplicated/resolve/main/data/train-00000-of-01650-f70471ee3deb09c0.parquet"
+    # List of dataset URLs
+    urls = [
+        "https://huggingface.co/datasets/EleutherAI/the_pile_deduplicated/resolve/main/data/train-00000-of-01650-f70471ee3deb09c0.parquet",
+        "https://huggingface.co/datasets/EleutherAI/the_pile_deduplicated/resolve/main/data/train-00001-of-01650-172fc1a0c346b36e.parquet"
+    ]
 
-    # Local file paths
-    downloaded_file = "train-00000-of-01650-f70471ee3deb09c0.parquet"
+    # Local final output file path
     final_file_name = "train.parquet"
 
-    # Download the dataset
-    if not os.path.exists(final_file_name):  # Check if the file is already downloaded
-        print(f"Downloading dataset from {url}...")
-        response = requests.get(url, stream=True)
-        with open(downloaded_file, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        print(f"Downloaded to {downloaded_file}.")
+    # Check if the final file already exists
+    if not os.path.exists(final_file_name):
+        print(f"Downloading and combining dataset from {len(urls)} files...")
 
-        # Rename the file
-        os.rename(downloaded_file, final_file_name)
-        print(f"Renamed to {final_file_name}.")
+        # List to hold all the dataframes
+        combined_df = pd.DataFrame()
+
+        # Loop through each URL to download and combine the files
+        for i, url in enumerate(urls):
+            downloaded_file = f"temp_file_{i}.parquet"
+            
+            # Download the dataset
+            print(f"Downloading dataset from {url}...")
+            response = requests.get(url, stream=True)
+            with open(downloaded_file, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"Downloaded to {downloaded_file}.")
+
+            # Read the downloaded parquet file and append to the combined dataframe
+            df = pd.read_parquet(downloaded_file)
+            combined_df = pd.concat([combined_df, df], ignore_index=True)
+
+            # Optionally remove the temporary file after reading
+            os.remove(downloaded_file)
+
+        # Save the combined dataframe as a final parquet file
+        combined_df.to_parquet(final_file_name)
+        print(f"Combined data saved to {final_file_name}.")
     else:
         print(f"{final_file_name} already exists. Skipping download.")
 
 
     # max_lengths = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-    max_lengths = [256, 128, 64, 32, 16, 8, 4, 2]
+    max_lengths = [256]
     bit = 16
 
     class Superfloat:
@@ -228,7 +248,7 @@ def train_and_upload():
         optimizer = torch.optim.Adam(quantized_model.parameters(), lr=1e-5, eps=1e-4)
         loss_fn = torch.nn.CrossEntropyLoss()
 
-        num_epochs = 3
+        num_epochs = 10
         accumulation_steps = 16
 
         for epoch in range(num_epochs):
@@ -266,7 +286,7 @@ def train_and_upload():
 
             # Upload model to Hugging Face
             os.system(
-                f"huggingface-cli upload aoxo/qwen2-sf16 {model_path} --token='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'"
+                f"huggingface-cli upload aoxo/qwen2-sf16-experimental {model_path} --token='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'"
             )
 
         del quantized_model
