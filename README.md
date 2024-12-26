@@ -179,6 +179,21 @@ Contributions are welcome! Feel free to open issues or submit pull requests.
 
 ---
 
+## **Sponsors**
+
+We would like to thank our sponsors for their support:
+
+### E2E Cloud
+<img src="[https://link-to-e2e-cloud-logo.com/logo.png](https://cdn.prod.website-files.com/6473d8d02a3cf26273f2787d/648bf48d630d922e183b931e_Thumbnail%2020.png)" width="200"/>
+
+### Modal
+<img src="https://link-to-modal-logo.com/logo.png" width="200"/>
+
+### Tencent
+<img src="https://link-to-tencent-logo.com/logo.png" width="200"/>
+
+---
+
 ## **License**
 
 This project is licensed under the MIT License.
