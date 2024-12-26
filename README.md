@@ -184,7 +184,7 @@ Contributions are welcome! Feel free to open issues or submit pull requests.
 We would like to thank our sponsors for their support:
 
 ### E2E Cloud
-<img src="[https://link-to-e2e-cloud-logo.com/logo.png](https://cdn.prod.website-files.com/6473d8d02a3cf26273f2787d/648bf48d630d922e183b931e_Thumbnail%2020.png)" width="200"/>
+<img src="https://scontent.fgoi1-1.fna.fbcdn.net/v/t39.30808-6/420082473_781490844014447_5654924958047860859_n.jpg?_nc_cat=106&ccb=1-7&_nc_sid=6ee11a&_nc_ohc=qwFXhKMqcBgQ7kNvgGLY0Jg&_nc_oc=AdjHBuyEgp_LZmRxscpCxJro65_r7Ov90uKAbLtZ0WySF5t0k07sziFvAGz4CG5MBwEODvEUQHxfiDi1wRvNTOS7&_nc_zt=23&_nc_ht=scontent.fgoi1-1.fna&_nc_gid=A7ga0MxLvcynDXkIiptpkvG&oh=00_AYDrm-mCrls8IhEkPypspoRkQWxxUv5N4MUhoMerJcHxbQ&oe=6772AFBA" width="200"/>
 
 ### Modal
 <img src="https://link-to-modal-logo.com/logo.png" width="200"/>
