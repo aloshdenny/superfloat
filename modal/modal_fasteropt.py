@@ -13,11 +13,11 @@ image = (
     .apt_install("gcc", "python3-dev")  # Add necessary system libraries if needed
 )
 
-app = modal.App("qwen-sf16-experimental")
+app = modal.App("qwen-sf4-experimental")
 
 # Define the function that runs the script
 # @app.function(gpu=modal.gpu.A100(size="80GB"), image=image, timeout=86400)
-@app.function(gpu="H100", image=image, timeout=86400)
+@app.function(gpu="A100", image=image, timeout=86400)
 def train_and_upload():
     import torch
     import gc
@@ -74,7 +74,7 @@ def train_and_upload():
 
     # max_lengths = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
     max_lengths = [256]
-    bit = 16
+    bit = 4
 
     class Superfloat:
         CASTING_TABLE = {
@@ -286,7 +286,7 @@ def train_and_upload():
 
             # Upload model to Hugging Face
             os.system(
-                f"huggingface-cli upload aoxo/qwen2-sf16-experimental {model_path} --token='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'"
+                f"huggingface-cli upload aoxo/qwen2-sf4-experimental {model_path} --token='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'"
             )
 
         del quantized_model
