@@ -1,96 +1,163 @@
-import torch
-from transformers import AutoModelForCausalLM
+import modal
 
-class Superfloat:
-    CASTING_TABLE = {
-        16: torch.float32,
-        15: torch.float32,
-        14: torch.float32,
-        13: torch.float32,
-        12: torch.float32,
-        11: torch.float16,
-        10: torch.float16,
-        9: torch.float16,
-        8: torch.bfloat16,
-        7: torch.bfloat16,
-        6: torch.bfloat16,
-        5: torch.bfloat16,
-        4: torch.bfloat16,
-    }
+# Create a Modal image with the required dependencies
+image = (
+    modal.Image.debian_slim()
+    .pip_install(
+        "torch",
+        "transformers",
+        "datasets",
+        "tqdm",
+        "huggingface_hub",
+    )
+    .apt_install("gcc", "python3-dev")  # Add necessary system libraries if needed
+)
 
-    def __init__(self, bits: int):
-        assert 4 <= bits <= 16, "Superfloat bitwidth must be between 4 and 16."
-        self.bits = bits
-        self.mantissa_bits = bits - 1
-        self.max_val = 1 - 2**-self.mantissa_bits  # Precompute max representable value
-        self.float_type = self.CASTING_TABLE[bits]  # Get float type based on bitwidth
+app = modal.App("test")
 
-    def encode(self, value: torch.Tensor) -> torch.Tensor:
-        """Encodes a tensor of values into the superfloat format."""
-        clipped_value = torch.clamp(value, min=-self.max_val, max=self.max_val)
-        mantissa = (torch.abs(clipped_value) * (2**self.mantissa_bits - 1) / self.max_val).floor().to(torch.int32)
-        sign = (clipped_value < 0).to(torch.int32)
-        return (mantissa | (sign << self.mantissa_bits)).to(torch.int32)
+@app.function(gpu="H100", image=image, timeout=86400)
+def train_and_upload():
+    import torch
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from tqdm import tqdm
+    from datasets import load_dataset
 
-    def decode(self, encoded_value: torch.Tensor) -> torch.Tensor:
-        """Decodes a tensor of encoded superfloat values to regular floats."""
-        mantissa = encoded_value & ((1 << self.mantissa_bits) - 1)
-        sign = (encoded_value >> self.mantissa_bits) & 1
-        decoded_value = (mantissa.to(self.float_type) / (2**self.mantissa_bits - 1)) * self.max_val
-        return decoded_value * (2 * sign - 1)
+    # Device setup
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
-    def tensor_quantize(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Quantizes a tensor to the superfloat format and decodes back."""
-        encoded_tensor = self.encode(tensor)
-        decoded_tensor = self.decode(encoded_tensor)
-        return decoded_tensor
+    # Define Superfloat quantizer for clamping activations
+    class Superfloat:
+        def __init__(self, bits: int):
+            assert 4 <= bits <= 16, "Superfloat bitwidth must be between 4 and 16."
+            self.bits = bits
+            self.mantissa_bits = bits - 1
+            self.max_val = 1 - 2**-self.mantissa_bits  # Precompute max representable value
 
-# Create an instance of Superfloat with the desired bitwidth
-sf = Superfloat(8)
+        def encode(self, value: torch.Tensor) -> torch.Tensor:
+            """Encodes a tensor of values into the superfloat format with optimized operations."""
+            # Clip tensor values to the valid range for SFx
+            clipped_value = torch.clamp(value, min=-self.max_val, max=self.max_val)
 
-# Function to quantize model parameters
-def quantize_model(model, sf_type):
-    for name, param in model.named_parameters():
-        print(f"Quantizing: {name}")
+            # Calculate mantissa representation element-wise
+            mantissa = (torch.abs(clipped_value) * (2**self.mantissa_bits - 1) / self.max_val).floor().to(torch.int32)
+
+            # Create the superfloat representation (1 bit for sign and mantissa bits)
+            sign = (clipped_value < 0).to(torch.int32)
+            return (mantissa | (sign << self.mantissa_bits)).to(torch.int32)
+
+        def decode(self, encoded_value: torch.Tensor) -> torch.Tensor:
+            """Decodes a tensor of encoded superfloat values to regular floats."""
+            # Extract mantissa and sign from the encoded superfloat
+            mantissa = encoded_value & ((1 << self.mantissa_bits) - 1)
+            sign = (encoded_value >> self.mantissa_bits) & 1
+
+            # Calculate the decoded float using the mantissa and max_val
+            decoded_value = (mantissa.to(torch.float32) / (2**self.mantissa_bits - 1)) * self.max_val
+            return decoded_value * (2 * sign - 1)  # Apply the sign
+
+        def tensor_quantize(self, tensor: torch.Tensor) -> torch.Tensor:
+            """Quantizes a tensor to the superfloat format, preserving the tensor's shape."""
+            # Apply element-wise encoding to the entire tensor and then decode back
+            encoded_tensor = self.encode(tensor)
+            decoded_tensor = self.decode(encoded_tensor)
+            return decoded_tensor
+
+    # Initialize Superfloat quantizer for sf{sf.bits} clamping
+    sf = Superfloat(8)
+
+    # Function to quantize the model
+    def quantize_model(model, sf_type):
+        for name, param in model.named_parameters():
+            print(f"Quantizing: {name}")
+            with torch.no_grad():
+                quantized_param = sf_type.tensor_quantize(param)
+                param.data.copy_(quantized_param)
+        return model
+
+    # Checker function to verify quantization
+    def check_model_quantization(model, sf_type):
+        all_parameters_valid = True
+        for name, param in model.named_parameters():
+            param_data = param.data
+            if not torch.all((param_data >= -sf_type.max_val) & (param_data <= sf_type.max_val)):
+                print(f"Parameter {name} has values outside the SF{sf_type.bits} range!")
+                all_parameters_valid = False
+        return all_parameters_valid
+
+    # Load model
+    model_name = "meta-llama/Llama-3.2-1B"
+
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir="./", token='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')
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # Load and prepare model
+    model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir="./", token='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')
+    model = model.to(device)
+    model.eval()
+
+    # Quantize parameters
+    print("Quantizing model parameters...")
+    quantized_model = quantize_model(model, sf)
+
+    # Verify quantization
+    print("Checking model quantization...")
+    is_valid = check_model_quantization(quantized_model, sf)
+
+    if is_valid:
+        print(f"All parameters are within the SF{sf.bits} range.")
+    else:
+        print("Model quantization verification failed. Fix issues before proceeding.")
+
+    # Function to calculate perplexity
+    def calculate_perplexity(model, tokenizer, prompt):
+        """Calculates the perplexity of the model on a given prompt."""
+        # Tokenize input
+        inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
+        input_ids = inputs.input_ids.to(device)
+        attention_mask = inputs.attention_mask.to(device)
+
+        # Get model outputs (logits)
         with torch.no_grad():
-            quantized_param = sf_type.tensor_quantize(param)
-            param.data.copy_(quantized_param)
-    return model
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
 
-# Checker function to verify quantization
-def check_model_quantization(model, sf_type):
-    all_parameters_valid = True
-    for name, param in model.named_parameters():
-        param_data = param.data
-        if param_data.dtype != sf_type.float_type:
-            print(f"Parameter {name} is not in {sf_type.float_type} format!")
-            all_parameters_valid = False
-        if not torch.all((param_data >= -sf_type.max_val) & (param_data <= sf_type.max_val)):
-            print(f"Parameter {name} has values outside the SF{sf_type.bits} range!")
-            all_parameters_valid = False
-    return all_parameters_valid
+        # Get the loss (cross entropy) from the model's output
+        loss = outputs.loss  # This is the cross-entropy loss
 
-# Load the Qwen model
-model_name = "Qwen/Qwen2-0.5B"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+        # Compute perplexity: exp(loss)
+        perplexity = torch.exp(loss)
+        return perplexity.item()
 
-model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
-model = model.to(sf.float_type).to(device)  # Ensure model uses the correct float type
+    # Function to load the HellaSwag dataset
+    def load_hellaswag_data():
+        """Load the HellaSwag dataset from Hugging Face."""
+        dataset = load_dataset("hellaswag", split='validation', trust_remote_code=True)
 
-# Quantize parameters
-print("Quantizing model parameters...")
-quantized_model = quantize_model(model, sf)
+        # Extract only the prompts (contexts) for evaluation
+        prompts = [entry['ctx'] for entry in dataset]
 
-# Verify quantization
-print("Checking model quantization...")
-is_valid = check_model_quantization(quantized_model, sf)
+        # Return the prompts as a list
+        return prompts
 
-if is_valid:
-    print(f"All parameters are in {sf.float_type} format and within the SF{sf.bits} range.")
-    # Save quantized model
-    save_path = f"sf{sf.bits}_qwen_quantized.pth"
-    torch.save(quantized_model.state_dict(), save_path)
-    print(f"Quantized model saved to {save_path}")
-else:
-    print("Model quantization verification failed. Fix issues before saving.")
+    # Load HellaSwag data (prompts)
+    prompts = load_hellaswag_data()
+
+    # Evaluate perplexity on a subset of prompts
+    num_prompts = 100  # Limit to 100 prompts for evaluation
+    selected_prompts = prompts[:num_prompts]
+
+    total_perplexity = 0.0
+    for prompt in tqdm(selected_prompts, desc="Calculating perplexity"):
+        perplexity = calculate_perplexity(quantized_model, tokenizer, prompt)
+        total_perplexity += perplexity
+
+    print(total_perplexity)
+
+    # Compute and print average perplexity
+    average_perplexity = total_perplexity / len(selected_prompts)
+    print(f"Average Perplexity: {average_perplexity}")
+
+@app.local_entrypoint()
+def main():
+    train_and_upload.remote()
