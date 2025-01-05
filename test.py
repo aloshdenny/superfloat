@@ -26,54 +26,115 @@ def train_and_upload():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Define Superfloat quantizer for clamping activations
     class Superfloat:
         def __init__(self, bits: int):
-            assert 4 <= bits <= 16, "Superfloat bitwidth must be between 4 and 16."
+            assert 2 <= bits <= 16, "Superfloat bitwidth must be between 4 and 16."
             self.bits = bits
             self.mantissa_bits = bits - 1
             self.max_val = 1 - 2**-self.mantissa_bits  # Precompute max representable value
 
         def encode(self, value: torch.Tensor) -> torch.Tensor:
-            """Encodes a tensor of values into the superfloat format with optimized operations."""
-            # Clip tensor values to the valid range for SFx
+            """Encodes a tensor of values into the superfloat format."""
             clipped_value = torch.clamp(value, min=-self.max_val, max=self.max_val)
-
-            # Calculate mantissa representation element-wise
             mantissa = (torch.abs(clipped_value) * (2**self.mantissa_bits - 1) / self.max_val).floor().to(torch.int32)
-
-            # Create the superfloat representation (1 bit for sign and mantissa bits)
             sign = (clipped_value < 0).to(torch.int32)
             return (mantissa | (sign << self.mantissa_bits)).to(torch.int32)
 
         def decode(self, encoded_value: torch.Tensor) -> torch.Tensor:
             """Decodes a tensor of encoded superfloat values to regular floats."""
-            # Extract mantissa and sign from the encoded superfloat
             mantissa = encoded_value & ((1 << self.mantissa_bits) - 1)
             sign = (encoded_value >> self.mantissa_bits) & 1
-
-            # Calculate the decoded float using the mantissa and max_val
             decoded_value = (mantissa.to(torch.float32) / (2**self.mantissa_bits - 1)) * self.max_val
-            return decoded_value * (2 * sign - 1)  # Apply the sign
+            return decoded_value * (2 * sign - 1)
 
-        def tensor_quantize(self, tensor: torch.Tensor) -> torch.Tensor:
-            """Quantizes a tensor to the superfloat format, preserving the tensor's shape."""
-            # Apply element-wise encoding to the entire tensor and then decode back
-            encoded_tensor = self.encode(tensor)
-            decoded_tensor = self.decode(encoded_tensor)
-            return decoded_tensor
+        def handle_outliers(self, tensor: torch.Tensor, percentile: float = 99.9) -> torch.Tensor:
+            """Clips outliers based on percentile threshold."""
+            threshold = torch.quantile(torch.abs(tensor), percentile/100)
+            return torch.clamp(tensor, -threshold, threshold)
+        
+        def quantize_per_channel(self, tensor: torch.Tensor) -> torch.Tensor:
+            """Applies per-channel quantization for weight matrices."""
+            original_shape = tensor.shape
+            
+            # Reshape to [out_channels, -1]
+            tensor_2d = tensor.reshape(original_shape[0], -1)
+            
+            # Compute scales per channel
+            scales = torch.max(torch.abs(tensor_2d), dim=1, keepdim=True)[0]
+            scales = torch.clamp(scales, min=1e-5)  # Prevent division by zero
+            
+            # Normalize, quantize, and rescale each channel
+            normalized = tensor_2d / scales
+            encoded = self.encode(normalized)
+            decoded = self.decode(encoded)
+            rescaled = decoded * scales
+            
+            # Reshape back to original shape
+            return rescaled.reshape(original_shape)
+        
+        def quantize_attention_weights(self, tensor: torch.Tensor) -> torch.Tensor:
+            """Special handling for attention weights using zero-mean normalization."""
+            mean = torch.mean(tensor)
+            centered = tensor - mean
+            scale = torch.max(torch.abs(centered))
+            scale = torch.clamp(scale, min=1e-5)
+            
+            normalized = centered / scale
+            encoded = self.encode(normalized)
+            decoded = self.decode(encoded)
+            
+            return (decoded * scale) + mean
+        
+        def quantize_layernorm_params(self, tensor: torch.Tensor) -> torch.Tensor:
+            """Special handling for LayerNorm parameters with higher precision."""
+            # For LayerNorm, we use a more conservative quantization
+            scale = torch.max(torch.abs(tensor))
+            scale = torch.clamp(scale, min=1e-5)
+            
+            normalized = tensor / scale
+            encoded = self.encode(normalized)
+            decoded = self.decode(encoded)
+            
+            return decoded * scale
+        
+        def tensor_quantize(self, tensor: torch.Tensor, layer_type: str = "default") -> torch.Tensor:
+            """Enhanced quantization with different strategies based on layer type."""
+            # Handle outliers first
+            tensor = self.handle_outliers(tensor)
+            
+            if layer_type == "attention":
+                # For attention layers, use zero-mean quantization
+                return self.quantize_attention_weights(tensor)
+            
+            elif layer_type == "layernorm":
+                # For LayerNorm parameters, use higher precision quantization
+                return self.quantize_layernorm_params(tensor)
+            
+            elif len(tensor.shape) > 1:
+                # For weight matrices (2D+), use per-channel quantization
+                return self.quantize_per_channel(tensor)
+            
+            else:
+                # For 1D tensors (biases, etc.), use simple absmax scaling
+                scale = torch.max(torch.abs(tensor))
+                scale = torch.clamp(scale, min=1e-5)
+                normalized = tensor / scale
+                encoded = self.encode(normalized)
+                decoded = self.decode(encoded)
+                return decoded * scale
 
     # Initialize Superfloat quantizer for sf{sf.bits} clamping
-    sf = Superfloat(8)
+    sf = Superfloat(4)
 
     # Function to quantize the model
-    def quantize_model(model, sf_type):
+    def quantize_model(model, sf_type, zero_mean=False, absmax_scale=False):
         for name, param in model.named_parameters():
             print(f"Quantizing: {name}")
             with torch.no_grad():
-                quantized_param = sf_type.tensor_quantize(param)
+                quantized_param = sf_type.tensor_quantize(param, zero_mean=zero_mean, absmax_scale=absmax_scale)
                 param.data.copy_(quantized_param)
         return model
+
 
     # Checker function to verify quantization
     def check_model_quantization(model, sf_type):
@@ -143,19 +204,15 @@ def train_and_upload():
     # Load HellaSwag data (prompts)
     prompts = load_hellaswag_data()
 
-    # Evaluate perplexity on a subset of prompts
-    num_prompts = 100  # Limit to 100 prompts for evaluation
-    selected_prompts = prompts[:num_prompts]
-
     total_perplexity = 0.0
-    for prompt in tqdm(selected_prompts, desc="Calculating perplexity"):
+    for prompt in tqdm(prompts, desc="Calculating perplexity"):
         perplexity = calculate_perplexity(quantized_model, tokenizer, prompt)
         total_perplexity += perplexity
 
-    print(total_perplexity)
+    print(total_perplexity/len(prompts))
 
     # Compute and print average perplexity
-    average_perplexity = total_perplexity / len(selected_prompts)
+    average_perplexity = total_perplexity / len(prompts)
     print(f"Average Perplexity: {average_perplexity}")
 
 @app.local_entrypoint()
