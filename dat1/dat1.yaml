@@ -1,0 +1,8 @@
+model_name: superfloat
+exclude:
+  - '**.git/**'
+  - '**__pycache__/**'
+  - .idea/**
+  - '*.md'
+  - '*.jpg'
+  - .dat1.yaml
