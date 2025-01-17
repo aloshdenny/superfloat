@@ -24,7 +24,7 @@ if not streamlit_script_local_path.exists():
 
 @app.function(
     allow_concurrent_inputs=100,
-    gpu="L4",  # Specify the GPU type (e.g., "A100", "H100")
+    gpu="A10G",  # Specify the GPU type (e.g., "A100", "H100")
     timeout=86400,  # Timeout in seconds (1 day = 86400 seconds)
 
 )
