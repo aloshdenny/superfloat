@@ -1,4 +1,4 @@
-superfloat/models--Qwen--Qwen2-0.5B/
-superfloat/models--meta-llama--Llama-3.2-1B/
+models--Qwen--Qwen2-0.5B/
+models--meta-llama--Llama-3.2-1B/
 .locks/
-superfloat/testing
+testing/*
