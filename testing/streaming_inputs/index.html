@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streaming LLM Frontend</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        #input {
+            width: 100%;
+            height: 100px;
+            font-size: 16px;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+        #output {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f4f4f4;
+            border: 1px solid #ccc;
+            white-space: pre-wrap; /* Preserve line breaks */
+        }
+    </style>
+</head>
+<body>
+    <h1>Streaming LLM Frontend</h1>
+    <textarea id="input" placeholder="Type something..."></textarea>
+    <div id="output">Output will appear here...</div>
+
+    <script>
+        // Function to update the output based on user input
+        async function updateOutput() {
+            const inputText = document.getElementById("input").value;
+            const outputDiv = document.getElementById("output");
+
+            try {
+                // Send a POST request to the backend
+                const response = await fetch("https://eduport-tech--streaming-llm-backend-fastapi-app-dev.modal.run/stream", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({ input_text: inputText }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+
+                // Parse the response and update the output
+                const data = await response.json();
+                outputDiv.innerText = data.output;
+            } catch (error) {
+                console.error("Error:", error);
+                outputDiv.innerText = "Error: Failed to fetch response from the backend.";
+            }
+        }
+
+        // Attach the updateOutput function to the input event
+        document.getElementById("input").addEventListener("input", updateOutput);
+    </script>
+</body>
+</html>

@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
+import math
 
 # Set your Hugging Face token
 hf_token = "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"
@@ -39,6 +40,11 @@ model_mapping = {
         4: "meta-llama/Llama-3.2-1B",
         8: "meta-llama/Llama-3.2-1B",
         16: "meta-llama/Llama-3.2-1B"
+    },
+    "meta-llama/Llama-3.2-3B": {
+        4: "meta-llama/Llama-3.2-3B",
+        8: "meta-llama/Llama-3.2-3B",
+        16: "meta-llama/Llama-3.2-3B"
     }
 }
 
@@ -61,9 +67,9 @@ def load_model(model_name, bitwidth, quantization_type, device):
     
     # Apply quantization
     for param in model.parameters():
-        if quantization_type == 'absmax':
+        if quantization_type == 'WASQ-LTH':
             param.data = absmax_quantize(param.data, bitwidth).to(torch.float16)  # Ensure quantization output is float16
-        elif quantization_type == 'zero_mean':
+        elif quantization_type == 'WASQ-OPT':
             param.data = zero_mean_quantize(param.data, bitwidth).to(torch.float16)  # Ensure quantization output is float16
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=hf_token)
@@ -94,17 +100,17 @@ def measure_performance(model, tokenizer, input_text, device):
     generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return inference_time, memory_usage, generated_text
 
-def calculate_perplexity(model, tokenizer, input_text, device):
-    inputs = tokenizer(input_text, return_tensors='pt').to(device)
-    max_length = inputs.input_ids.size(1)
-    with torch.no_grad():
-        outputs = model(**inputs)
-        shift_logits = outputs.logits[..., :-1, :].contiguous()
-        shift_labels = inputs.input_ids[..., 1:].contiguous()
-        loss_fct = torch.nn.CrossEntropyLoss()
-        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        perplexity = torch.exp(loss).item()
-    return perplexity
+# def calculate_perplexity(model, tokenizer, input_text, device):
+#     inputs = tokenizer(input_text, return_tensors='pt').to(device)
+#     max_length = inputs.input_ids.size(1)
+#     with torch.no_grad():
+#         outputs = model(**inputs)
+#         shift_logits = outputs.logits[..., :-1, :].contiguous()
+#         shift_labels = inputs.input_ids[..., 1:].contiguous()
+#         loss_fct = torch.nn.CrossEntropyLoss()
+#         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+#         perplexity = torch.exp(loss).item()
+#     return perplexity
 
 # Define request models
 class ModelRequest(BaseModel):
@@ -126,6 +132,12 @@ image = (
 )
 
 app = modal.App(name="emelinlabs-runner", image=image)
+
+def sanitize_float(value):
+    """Ensure the value is a finite float and replace NaN/Infinity with 0.0."""
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        return 0.0
+    return value
 
 # POST endpoint
 @app.function(
@@ -157,32 +169,49 @@ def run_inference(request: ModelRequest):
 
     # Measure performance for original model
     orig_inference_time, orig_memory_usage, orig_text = measure_performance(original_model, tokenizer, input_text, device)
-    orig_perplexity = calculate_perplexity(original_model, tokenizer, input_text, device)
+    # orig_perplexity = calculate_perplexity(original_model, tokenizer, input_text, device)
 
     # Measure performance for quantized model
     quant_inference_time, _, quant_text = measure_performance(quantized_model, tokenizer, input_text, device)
-    quant_perplexity = calculate_perplexity(quantized_model, tokenizer, input_text, device)
+    # quant_perplexity = calculate_perplexity(quantized_model, tokenizer, input_text, device)
 
     # Calculate memory usage for quantized model
     quant_memory_usage = (effective_bits / 16.0) * orig_memory_usage
 
     # Calculate differences
     speed_diff = (orig_inference_time - quant_inference_time) / orig_inference_time * 100
-    memory_savings = (orig_memory_usage - (effective_bits / 16.0) * quant_memory_usage) / orig_memory_usage * 100
-    perplexity_diff = quant_perplexity - orig_perplexity
+    memory_savings = (1 - (quantization_bits / 16.0)) * 100
+    # perplexity_diff = quant_perplexity - orig_perplexity
+
+    # Sanitize all floating-point values
+    orig_inference_time = sanitize_float(orig_inference_time)
+    orig_memory_usage = sanitize_float(orig_memory_usage)
+    # orig_perplexity = sanitize_float(orig_perplexity)
+    quant_inference_time = sanitize_float(quant_inference_time)
+    quant_memory_usage = sanitize_float(quant_memory_usage)
+    # quant_perplexity = sanitize_float(quant_perplexity)
+    speed_diff = sanitize_float(speed_diff)
+    memory_savings = sanitize_float(memory_savings)
+    # perplexity_diff = sanitize_float(perplexity_diff)
 
     # Store results in Modal Dict
     results_dict[request_id] = {
         "original": {
             "text": orig_text,
+            "inference_time": orig_inference_time,
+            "memory_usage": orig_memory_usage,
+            # "perplexity": orig_perplexity
         },
         "quantized": {
             "text": quant_text,
+            "inference_time": quant_inference_time,
+            "memory_usage": quant_memory_usage,
+            # "perplexity": quant_perplexity
         },
         "comparison": {
             "speed_diff": speed_diff,
             "memory_savings": memory_savings,
-            "perplexity_diff": perplexity_diff
+            # "perplexity_diff": perplexity_diff
         }
     }
 
