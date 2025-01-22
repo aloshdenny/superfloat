@@ -7,13 +7,21 @@ from bokeh.resources import INLINE
 from flask_socketio import SocketIO, emit
 from flask import request
 import time
+import os
 
 # Initialize Flask app
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# Initialize the OpenAI client
-client = OpenAI(api_key="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")
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Get the OpenAI API key from the environment variable
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
+client = OpenAI(api_key=openai_api_key)
 
 # Store last update timestamp for rate limiting
 last_update = {}
