@@ -24,12 +24,13 @@ tokenizer = None
 model = None
 past_key_values = None
 input_buffer = ""
+previous_input_ids = torch.tensor([], dtype=torch.long).to("cuda")  # Initialize as an empty tensor
 
 # Load the tokenizer and model inside the Modal container
 def load_model():
     global tokenizer, model
 
-    model_name = "meta-llama/Llama-3.2-3B"  # Example model, choose your preferred model
+    model_name = "meta-llama/Llama-3.2-3B"
     cache_dir = "/cache"
 
     # Download and cache the tokenizer and model
@@ -47,6 +48,31 @@ def load_model():
 
     # Persist the cache to the Modal Volume
     cache_volume.commit()
+
+def tokenize_incrementally(tokenizer, input_buffer, previous_input_ids):
+    # Tokenize only the new portion of the input
+    new_input = input_buffer[len(previous_input_ids):]
+    new_input_ids = tokenizer.encode(new_input, return_tensors="pt", add_special_tokens=False).to("cuda")
+    
+    # Append new tokens to the previous input IDs
+    updated_input_ids = torch.cat([previous_input_ids, new_input_ids], dim=-1)
+    return updated_input_ids
+
+def update_kv_cache(model, input_ids, past_key_values):
+    with torch.no_grad():
+        outputs = model(input_ids, past_key_values=past_key_values, use_cache=True)
+        updated_past_key_values = outputs.past_key_values
+    return updated_past_key_values
+
+def should_generate_output(input_buffer):
+    # Trigger generation if the input ends with a question mark or the user pauses
+    return input_buffer.strip().endswith("?") or len(input_buffer) > 50  # Adjust as needed
+
+def handle_backspace(input_buffer, previous_input_ids, past_key_values):
+    # If the input buffer is shorter than before, reset the KV cache
+    if len(input_buffer) < len(previous_input_ids):
+        past_key_values = None
+    return past_key_values
 
 # Define the request body schema using Pydantic
 class StreamRequest(BaseModel):
@@ -69,29 +95,32 @@ web_app.add_middleware(
 
 @web_app.post("/stream")
 async def stream(request: StreamRequest):
-    global past_key_values, input_buffer
+    global past_key_values, input_buffer, previous_input_ids
 
     # Validate the input
     if not request.input_text:
         raise HTTPException(status_code=422, detail="Input text cannot be empty")
 
-    # Append incoming text to the input buffer
-    input_buffer += request.input_text
+    # Update the input buffer
+    input_buffer = request.input_text
 
-    # Tokenize the entire input buffer (using subword-level or word-level)
-    inputs = tokenizer(input_buffer, return_tensors="pt", add_special_tokens=True).to("cuda") 
+    # Handle backspacing or edits
+    past_key_values = handle_backspace(input_buffer, previous_input_ids, past_key_values)
 
-    # Perform incremental inference with KV caching
-    with torch.no_grad():
-        outputs = model(inputs.input_ids, past_key_values=past_key_values, use_cache=True)
-        past_key_values = outputs.past_key_values
+    # Tokenize incrementally
+    input_ids = tokenize_incrementally(tokenizer, input_buffer, previous_input_ids)
+    previous_input_ids = input_ids
 
-    # Decode the generated tokens
-    generated_token_ids = outputs.logits.argmax(dim=-1).squeeze().tolist()
-    output_text = tokenizer.decode(generated_token_ids, skip_special_tokens=True) 
+    # Update the KV cache
+    past_key_values = update_kv_cache(model, input_ids, past_key_values)
 
-    # Clear the buffer to avoid reprocessing (optional: keep some context for better generation)
-    # input_buffer = "" 
+    # Generate output only if the context is sufficient
+    if should_generate_output(input_buffer):
+        with torch.no_grad():
+            outputs = model.generate(input_ids, max_new_tokens=50, past_key_values=past_key_values, use_cache=True)
+            output_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    else:
+        output_text = "Waiting for more input..."
 
     # Clean up memory
     gc.collect()

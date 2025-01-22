@@ -59,8 +59,12 @@
             }
         }
 
-        // Attach the updateOutput function to the input event
-        document.getElementById("input").addEventListener("input", updateOutput);
+        // Throttle the input event to avoid overwhelming the backend
+        let timeoutId;
+        document.getElementById("input").addEventListener("input", () => {
+            clearTimeout(timeoutId);
+            timeoutId = setTimeout(updateOutput, 396); // Adjust the delay as needed
+        });
     </script>
 </body>
 </html>
