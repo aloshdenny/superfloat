@@ -123,7 +123,18 @@ class ModelRequest(BaseModel):
 results_dict = modal.Dict.from_name("emelinlabs-results", create_if_missing=True)
 
 # Create a FastAPI app
+from fastapi.middleware.cors import CORSMiddleware
+
 app_fastapi = FastAPI()
+
+# Add CORS middleware
+app_fastapi.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins (replace with your frontend URL in production)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Modal setup
 image = (
@@ -153,6 +164,8 @@ def run_inference(request: ModelRequest):
     quantization_type = request.quantization_type
     input_text = request.input_text
 
+    print(f"Model: {model_name}, Bits: {quantization_bits}, Type: {quantization_type}")
+
     # Generate a unique ID for this request
     request_id = str(uuid.uuid4())
 
@@ -161,19 +174,24 @@ def run_inference(request: ModelRequest):
         model_name, torch_dtype=torch.float16
     ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=hf_token)
-    
+
     # Load and quantize model
     effective_bits = map_bitwidth(quantization_bits)
     quantized_model_name = model_mapping[model_name][effective_bits]
     quantized_model, _ = load_model(quantized_model_name, effective_bits, quantization_type, device)
 
-    # Measure performance for original model
-    orig_inference_time, orig_memory_usage, orig_text = measure_performance(original_model, tokenizer, input_text, device)
-    # orig_perplexity = calculate_perplexity(original_model, tokenizer, input_text, device)
+    # Function to run inference and measure performance
+    def run_model_inference(model, tokenizer, input_text, device):
+        inference_time, memory_usage, generated_text = measure_performance(model, tokenizer, input_text, device)
+        return inference_time, memory_usage, generated_text
 
-    # Measure performance for quantized model
-    quant_inference_time, _, quant_text = measure_performance(quantized_model, tokenizer, input_text, device)
-    # quant_perplexity = calculate_perplexity(quantized_model, tokenizer, input_text, device)
+    # Run original and quantized model inference in parallel
+    with ThreadPoolExecutor() as executor:
+        orig_future = executor.submit(run_model_inference, original_model, tokenizer, input_text, device)
+        quant_future = executor.submit(run_model_inference, quantized_model, tokenizer, input_text, device)
+
+        orig_inference_time, orig_memory_usage, orig_text = orig_future.result()
+        quant_inference_time, quant_memory_usage, quant_text = quant_future.result()
 
     # Calculate memory usage for quantized model
     quant_memory_usage = (effective_bits / 16.0) * orig_memory_usage
@@ -181,18 +199,14 @@ def run_inference(request: ModelRequest):
     # Calculate differences
     speed_diff = (orig_inference_time - quant_inference_time) / orig_inference_time * 100
     memory_savings = (1 - (quantization_bits / 16.0)) * 100
-    # perplexity_diff = quant_perplexity - orig_perplexity
 
     # Sanitize all floating-point values
     orig_inference_time = sanitize_float(orig_inference_time)
     orig_memory_usage = sanitize_float(orig_memory_usage)
-    # orig_perplexity = sanitize_float(orig_perplexity)
     quant_inference_time = sanitize_float(quant_inference_time)
     quant_memory_usage = sanitize_float(quant_memory_usage)
-    # quant_perplexity = sanitize_float(quant_perplexity)
     speed_diff = sanitize_float(speed_diff)
     memory_savings = sanitize_float(memory_savings)
-    # perplexity_diff = sanitize_float(perplexity_diff)
 
     # Store results in Modal Dict
     results_dict[request_id] = {
@@ -200,18 +214,15 @@ def run_inference(request: ModelRequest):
             "text": orig_text,
             "inference_time": orig_inference_time,
             "memory_usage": orig_memory_usage,
-            # "perplexity": orig_perplexity
         },
         "quantized": {
             "text": quant_text,
             "inference_time": quant_inference_time,
             "memory_usage": quant_memory_usage,
-            # "perplexity": quant_perplexity
         },
         "comparison": {
             "speed_diff": speed_diff,
             "memory_savings": memory_savings,
-            # "perplexity_diff": perplexity_diff
         }
     }
 

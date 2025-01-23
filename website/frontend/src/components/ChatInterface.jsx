@@ -3,8 +3,8 @@ import { Send, Trash2, Edit2, ChevronRight, ChevronLeft, BarChart2, Check } from
 import ReactMarkdown from 'react-markdown';
 
 const API_BASE_URL = {
-  RUN_INFERENCE: "https://eduport-tech--emelinlabs-runner-run-inference.modal.run",
-  GET_RESULT: "https://eduport-tech--emelinlabs-runner-get-result.modal.run"
+  RUN_INFERENCE: "https://eduport-tech--emelinlabs-runner-run-inference-dev.modal.run",
+  GET_RESULT: "https://eduport-tech--emelinlabs-runner-get-result-dev.modal.run"
 };
 
 const ChatInterface = () => {
