@@ -1,10 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Send, Trash2, Edit2, ChevronRight, ChevronLeft, BarChart2, Check } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
 const API_BASE_URL = {
-  RUN_INFERENCE: "https://eduport-tech--emelinlabs-runner-run-inference.modal.run",
-  GET_RESULT: "https://eduport-tech--emelinlabs-runner-get-result.modal.run"
+  RUN_INFERENCE: "https://eduport-tech--emelinlabs-runner-run-inference-dev.modal.run",
+  GET_RESULT: "https://eduport-tech--emelinlabs-runner-get-result-dev.modal.run",
+  STREAM_ORIGINAL: "https://eduport-tech--emelinlabs-runner-stream-original-dev.modal.run",
+  STREAM_QUANTIZED: "https://eduport-tech--emelinlabs-runner-stream-quantized-dev.modal.run"
 };
 
 const ChatInterface = () => {
@@ -18,6 +20,7 @@ const ChatInterface = () => {
   const [quantizationBits, setQuantizationBits] = useState(6);
   const [quantizationType, setQuantizationType] = useState('WASQ-OPT');
   const [loading, setLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
 
   // API request helper function
   const makeApiRequest = async (url, options) => {
@@ -63,6 +66,73 @@ const ChatInterface = () => {
     throw new Error('Timeout waiting for response');
   };
 
+  // Handle streaming responses
+  const handleStreaming = (requestId) => {
+    setStreaming(true);
+
+    const originalEventSource = new EventSource(`${API_BASE_URL.STREAM_ORIGINAL}?request_id=${requestId}`);
+    const quantizedEventSource = new EventSource(`${API_BASE_URL.STREAM_QUANTIZED}?request_id=${requestId}`);
+
+    let originalText = '';
+    let quantizedText = '';
+
+    originalEventSource.onmessage = (event) => {
+      originalText += event.data + ' ';
+      setMessages(prevMessages => {
+        const lastMessage = prevMessages[prevMessages.length - 1];
+        if (lastMessage && lastMessage.sender === 'bot') {
+          return [
+            ...prevMessages.slice(0, -1),
+            {
+              ...lastMessage,
+              metrics: {
+                ...lastMessage.metrics,
+                original: {
+                  ...lastMessage.metrics.original,
+                  text: originalText.trim(),
+                },
+              },
+            },
+          ];
+        }
+        return prevMessages;
+      });
+    };
+
+    quantizedEventSource.onmessage = (event) => {
+      quantizedText += event.data + ' ';
+      setMessages(prevMessages => {
+        const lastMessage = prevMessages[prevMessages.length - 1];
+        if (lastMessage && lastMessage.sender === 'bot') {
+          return [
+            ...prevMessages.slice(0, -1),
+            {
+              ...lastMessage,
+              metrics: {
+                ...lastMessage.metrics,
+                quantized: {
+                  ...lastMessage.metrics.quantized,
+                  text: quantizedText.trim(),
+                },
+              },
+            },
+          ];
+        }
+        return prevMessages;
+      });
+    };
+
+    originalEventSource.onerror = () => {
+      originalEventSource.close();
+      setStreaming(false);
+    };
+
+    quantizedEventSource.onerror = () => {
+      quantizedEventSource.close();
+      setStreaming(false);
+    };
+  };
+
   // Run inference function
   const runInference = async (inputText) => {
     try {
@@ -83,6 +153,8 @@ const ChatInterface = () => {
       if (!postResponse || !postResponse.request_id) {
         throw new Error('Invalid response from server');
       }
+
+      handleStreaming(postResponse.request_id);
 
       const results = await pollForResults(postResponse.request_id);
 

@@ -1,4 +1,5 @@
 import modal
+import json
 
 # Create a Modal image with the required dependencies
 image = (
@@ -96,9 +97,9 @@ def train_and_upload():
             self.pruning_iterations = config.get('pruning_iterations', 3)
             self.optimizer = optim.Adam(self.model.parameters(), lr=config.get('learning_rate', 1e-5), eps=config.get('optimizer_eps', 1e-4))
             self.loss_fn = nn.CrossEntropyLoss()
-            self.scaler = torch.cuda.amp.GradScaler()  # For mixed precision training
+            self.scaler = torch.amp.GradScaler()  # For mixed precision training
 
-        def prepare_dataset(self, max_length=2):
+        def prepare_dataset(self, max_length=1):
             dataset = Dataset.from_parquet('train.parquet')
             
             def tokenize_function(examples):
@@ -163,7 +164,18 @@ def train_and_upload():
             for name in original_activations:
                 differences[name] = abs(original_activations[name] - quantized_activations[name])
             return differences
+        
+        def calculate_perplexity(self, logits, labels):
+            """Calculate perplexity from logits and labels."""
+            loss = self.loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
+            return torch.exp(loss).item()
 
+        def generate_outputs(self, input_text):
+            """Generate text outputs from the model."""
+            inputs = self.tokenizer(input_text, return_tensors="pt").to(self.device)
+            outputs = self.model.generate(**inputs, max_length=50)
+            return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
         def fine_tune_based_on_activations(self, layer_activation_changes):
             # Fine-tune layers with significant activation change
             for layer, change in layer_activation_changes.items():
@@ -196,7 +208,7 @@ def train_and_upload():
                         input_ids = batch['input_ids'].to(device=self.device, dtype=torch.long)
                         attention_mask = batch['attention_mask'].to(device=self.device, dtype=torch.long)
                         
-                        with torch.cuda.amp.autocast(dtype=torch.float16):
+                        with torch.amp.autocast(dtype=torch.float16, device_type='cuda'):
                             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
                             logits = outputs.logits
                             
@@ -228,6 +240,28 @@ def train_and_upload():
                     
                     epoch_loss /= len(dataloader)
                     print(f"Epoch {epoch + 1} Loss: {epoch_loss:.4f}")
+
+                    # Calculate perplexity and generate outputs
+                    perplexity = self.calculate_perplexity(logits, target)
+                    input_text = "The future of AI is"
+                    generated_output = self.generate_outputs(input_text)
+                    
+                    # Save results as JSON
+                    results = {
+                        "iteration": iteration + 1,
+                        "epoch": epoch + 1,
+                        "loss": epoch_loss,
+                        "perplexity": perplexity,
+                        "generated_output": generated_output,
+                    }
+                    json_path = f"iteration_{iteration+1}_epoch_{epoch+1}.json"
+                    with open(json_path, "w") as f:
+                        json.dump(results, f)
+                    
+                    # Upload JSON to Hugging Face
+                    os.system(
+                        f"huggingface-cli upload aoxo/qwen2-0.5b-LTH {json_path} --token='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'"
+                    )
                     
                     if epoch_loss < best_loss:
                         best_loss = epoch_loss
@@ -253,7 +287,7 @@ def train_and_upload():
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     
     # Initialize the Superfloat quantizer
-    sf_quantizer = Superfloat(bits=11)  # You can experiment with different bit-widths
+    sf_quantizer = Superfloat(bits=4)  # You can experiment with different bit-widths
     
     # Configuration settings
     config = {

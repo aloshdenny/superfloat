@@ -6,10 +6,11 @@ import gc
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import math
+from fastapi.responses import StreamingResponse
 
 # Set your Hugging Face token
 hf_token = "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"
@@ -99,18 +100,6 @@ def measure_performance(model, tokenizer, input_text, device):
     memory_usage = psutil.Process().memory_info().rss / (1024 ** 2)  # in MB
     generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return inference_time, memory_usage, generated_text
-
-# def calculate_perplexity(model, tokenizer, input_text, device):
-#     inputs = tokenizer(input_text, return_tensors='pt').to(device)
-#     max_length = inputs.input_ids.size(1)
-#     with torch.no_grad():
-#         outputs = model(**inputs)
-#         shift_logits = outputs.logits[..., :-1, :].contiguous()
-#         shift_labels = inputs.input_ids[..., 1:].contiguous()
-#         loss_fct = torch.nn.CrossEntropyLoss()
-#         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-#         perplexity = torch.exp(loss).item()
-#     return perplexity
 
 # Define request models
 class ModelRequest(BaseModel):
@@ -249,3 +238,31 @@ def get_result(request_id: str):
 @modal.web_endpoint()
 def health_check():
     return {"status": "active"}
+
+# Stream tokens from original model
+@app.function()
+@modal.web_endpoint()
+def stream_original(request_id: str):
+    result = results_dict.get(request_id, None)
+    if result:
+        def generate():
+            for token in result["original"]["text"].split():
+                yield f"data: {token}\n\n"
+                time.sleep(0.1)  # Simulate streaming delay
+        return StreamingResponse(generate(), media_type="text/event-stream")
+    else:
+        return {"error": "Request ID not found"}
+
+# Stream tokens from quantized model
+@app.function()
+@modal.web_endpoint()
+def stream_quantized(request_id: str):
+    result = results_dict.get(request_id, None)
+    if result:
+        def generate():
+            for token in result["quantized"]["text"].split():
+                yield f"data: {token}\n\n"
+                time.sleep(0.1)  # Simulate streaming delay
+        return StreamingResponse(generate(), media_type="text/event-stream")
+    else:
+        return {"error": "Request ID not found"}
