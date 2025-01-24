@@ -9,6 +9,7 @@ image = (
         "datasets",
         "tqdm",
         "huggingface_hub",
+        "requests",
     )
     .apt_install("gcc", "python3-dev")  # Add necessary system libraries if needed
 )
@@ -22,15 +23,14 @@ def train_and_upload():
     import torch.optim as optim
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from torch.utils.data import DataLoader
-    from datasets import load_dataset, Dataset
+    from datasets import Dataset
     from tqdm import tqdm
-    import gc
     import os
     import numpy as np
     import copy
     import requests
 
-        # URL of the dataset
+    # URL of the dataset
     url = "https://huggingface.co/datasets/EleutherAI/the_pile_deduplicated/resolve/main/data/train-00000-of-01650-f70471ee3deb09c0.parquet"
 
     # Local file paths
@@ -51,7 +51,6 @@ def train_and_upload():
         print(f"Renamed to {final_file_name}.")
     else:
         print(f"{final_file_name} already exists. Skipping download.")
-
 
     class Superfloat:
         CASTING_TABLE = {
@@ -77,59 +76,27 @@ def train_and_upload():
             self.max_val = 1 - 2**-self.mantissa_bits  # Precompute max representable value
             self.float_type = self.CASTING_TABLE[bits]  # Get float type based on bitwidth
 
-        def encode(self, value: torch.Tensor) -> torch.Tensor:
-            """Encodes a tensor of values into the superfloat format."""
-            clipped_value = torch.clamp(value, min=-self.max_val, max=self.max_val)
-            mantissa = (torch.abs(clipped_value) * (2**self.mantissa_bits - 1) / self.max_val).floor().to(torch.int32)
-            sign = (clipped_value < 0).to(torch.int32)
-            return (mantissa | (sign << self.mantissa_bits)).to(torch.int32)
-
-        def decode(self, encoded_value: torch.Tensor) -> torch.Tensor:
-            """Decodes a tensor of encoded superfloat values to regular floats."""
-            mantissa = encoded_value & ((1 << self.mantissa_bits) - 1)
-            sign = (encoded_value >> self.mantissa_bits) & 1
-            decoded_value = (mantissa.to(self.float_type) / (2**self.mantissa_bits - 1)) * self.max_val
-            return decoded_value * (2 * sign - 1)
-
-        def tensor_quantize(self, tensor: torch.Tensor) -> torch.Tensor:
-            """Quantizes a tensor to the superfloat format and decodes back."""
-            encoded_tensor = self.encode(tensor)
-            decoded_tensor = self.decode(encoded_tensor)
-            return decoded_tensor
+        def quantize(self, tensor: torch.Tensor) -> torch.Tensor:
+            """Quantizes a tensor to Superfloat format."""
+            # Per-channel scaling for dynamic range
+            scale = self.max_val / tensor.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-8)
+            quantized = torch.clamp(tensor * scale, -self.max_val, self.max_val).round()
+            return quantized / scale  # Dequantize for inference
 
     class LotteryTicketTrainer:
         def __init__(self, model, sf_quantizer, tokenizer, config):
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.sf_quantizer = sf_quantizer
-            
-            # Convert model to the correct dtype based on sf_quantizer
-            model = model.to(device=self.device)
-            # Ensure the entire model uses the same dtype as specified in sf_quantizer
-            model = model.to(dtype=sf_quantizer.float_type)
-            self.model = model
-            
+            self.model = model.to(device=self.device)
             self.tokenizer = tokenizer
             self.config = config
-            # Store original model state with correct dtype
-            self.original_model_state = {
-                name: param.to(sf_quantizer.float_type) 
-                for name, param in copy.deepcopy(self.model.state_dict()).items()
-            }
+            self.original_model_state = copy.deepcopy(self.model.state_dict())
             self.winning_tickets = {}
             self.pruning_rate = config.get('pruning_rate', 0.2)
             self.pruning_iterations = config.get('pruning_iterations', 3)
-            self.optimizer = optim.Adam(
-                self.model.parameters(), 
-                lr=config.get('learning_rate', 1e-5), 
-                eps=config.get('optimizer_eps', 1e-4)
-            )
+            self.optimizer = optim.Adam(self.model.parameters(), lr=config.get('learning_rate', 1e-5), eps=config.get('optimizer_eps', 1e-4))
             self.loss_fn = nn.CrossEntropyLoss()
-
-            # Create gradient scaler for mixed precision training
-            self.scaler = torch.amp.GradScaler()
-
-            # Set up autocast dtype
-            self.amp_dtype = torch.float16 if sf_quantizer.bits <= 11 else torch.float32
+            self.scaler = torch.cuda.amp.GradScaler()  # For mixed precision training
 
         def prepare_dataset(self, max_length=2):
             dataset = Dataset.from_parquet('train.parquet')
@@ -172,17 +139,30 @@ def train_and_upload():
         def reset_to_winning_ticket(self, pruning_masks):
             for name, param in self.model.named_parameters():
                 if name in pruning_masks:
-                    mask = pruning_masks[name]
-                    original_init = self.original_model_state[name]
-                    param.data = original_init * mask
+                    # Reset to original initialization, then apply mask
+                    param.data.copy_(self.original_model_state[name])
+                    param.data *= pruning_masks[name]
 
         def activation_magnitude_analysis(self):
-            # Placeholder: Implement activation magnitude analysis after each forward pass
-            layer_activation_changes = {}
-            for name, param in self.model.named_parameters():
-                # Analyze activation differences between the original and quantized models (per layer)
-                pass  # Here you would track activations before and after quantization
-            return layer_activation_changes
+            # Compare activations between original and quantized models
+            with torch.no_grad():
+                original_activations = self.get_activations(self.original_model_state)
+                quantized_activations = self.get_activations(self.model.state_dict())
+                return self.compute_layerwise_differences(original_activations, quantized_activations)
+
+        def get_activations(self, model_state):
+            # Placeholder: Implement forward pass to collect activations
+            activations = {}
+            for name, param in model_state.items():
+                if len(param.shape) > 1:
+                    activations[name] = torch.mean(torch.abs(param)).item()
+            return activations
+
+        def compute_layerwise_differences(self, original_activations, quantized_activations):
+            differences = {}
+            for name in original_activations:
+                differences[name] = abs(original_activations[name] - quantized_activations[name])
+            return differences
 
         def fine_tune_based_on_activations(self, layer_activation_changes):
             # Fine-tune layers with significant activation change
@@ -192,11 +172,9 @@ def train_and_upload():
                     pass  # Fine-tune layer weights based on magnitude analysis
 
         def train(self):
-            # Prepare dataset
             tokenized_dataset = self.prepare_dataset()
             dataloader = self.create_dataloader(tokenized_dataset)
             
-            # Training parameters
             num_epochs = self.config.get('num_epochs', 3)
             accumulation_steps = self.config.get('accumulation_steps', 32)
             best_loss = float('inf')
@@ -209,83 +187,63 @@ def train_and_upload():
                     epoch_loss = 0.0
                     
                     epoch_iterator = tqdm(
-                        enumerate(dataloader), 
-                        total=len(dataloader), 
+                        enumerate(dataloader),
+                        total=len(dataloader),
                         desc=f"Iteration {iteration + 1}, Epoch {epoch + 1}"
                     )
                     
-                    # Zero the gradients at the start of each epoch
-                    self.optimizer.zero_grad()
-                    
                     for step, batch in epoch_iterator:
-                        # Move batch to device
-                        input_ids = batch['input_ids'].to(self.device)
-                        attention_mask = batch['attention_mask'].to(self.device)
+                        input_ids = batch['input_ids'].to(device=self.device, dtype=torch.long)
+                        attention_mask = batch['attention_mask'].to(device=self.device, dtype=torch.long)
                         
-                        # Forward pass with automatic mixed precision
-                        with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
-                            outputs = self.model(
-                                input_ids=input_ids,
-                                attention_mask=attention_mask
-                            )
+                        with torch.cuda.amp.autocast(dtype=torch.float16):
+                            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
                             logits = outputs.logits
                             
-                            # Prepare targets
                             target = input_ids[:, 1:].contiguous()
                             logits = logits[:, :-1].contiguous()
                             
-                            # Calculate loss
                             loss = self.loss_fn(
-                                logits.view(-1, logits.size(-1)),
+                                logits.view(-1, logits.size(-1)), 
                                 target.view(-1)
                             ) / accumulation_steps
                         
-                        # Backward pass with gradient scaling
                         self.scaler.scale(loss).backward()
-                        
-                        # Accumulate loss
                         epoch_loss += loss.item() * accumulation_steps
                         
                         if (step + 1) % accumulation_steps == 0:
-                            # Unscale gradients and update parameters
                             self.scaler.step(self.optimizer)
                             self.scaler.update()
                             self.optimizer.zero_grad()
                             
                             # Clamp parameters within Superfloat range
-                            with torch.no_grad():
-                                for param in self.model.parameters():
-                                    param.data = torch.clamp(
-                                        param.data,
-                                        min=-self.sf_quantizer.max_val,
-                                        max=self.sf_quantizer.max_val
-                                    )
+                            for param in self.model.parameters():
+                                param.data = torch.clamp(
+                                    param.data, 
+                                    min=-self.sf_quantizer.max_val, 
+                                    max=self.sf_quantizer.max_val
+                                )
                             
-                            epoch_iterator.set_postfix({
-                                "Loss": f"{loss.item() * accumulation_steps:.4f}"
-                            })
+                            epoch_iterator.set_postfix({"Loss": f"{loss.item() * accumulation_steps:.4f}"})
                     
-                    # Calculate average epoch loss
                     epoch_loss /= len(dataloader)
                     print(f"Epoch {epoch + 1} Loss: {epoch_loss:.4f}")
                     
-                    # Save best model
                     if epoch_loss < best_loss:
                         best_loss = epoch_loss
                         torch.save(
-                            self.model.state_dict(),
+                            self.model.state_dict(), 
                             f"sf{self.sf_quantizer.bits}_iteration{iteration+1}_epoch{epoch+1}_best.pth"
                         )
                 
-                # Perform pruning after each iteration
                 pruning_masks = self.magnitude_based_pruning()
                 self.reset_to_winning_ticket(pruning_masks)
                 
-                # Save winning ticket for this iteration
-                torch.save(
-                    self.model.state_dict(),
-                    f"sf{self.sf_quantizer.bits}_winning_ticket_iteration{iteration+1}.pth"
-                )
+                # After pruning, perform activation analysis and fine-tuning
+                layer_activation_changes = self.activation_magnitude_analysis()
+                self.fine_tune_based_on_activations(layer_activation_changes)
+                
+                torch.save(self.model.state_dict(), f"sf{self.sf_quantizer.bits}_winning_ticket_iteration{iteration+1}.pth")
 
     # Load the pre-trained model and tokenizer
     model_name = "Qwen/Qwen2-0.5B"

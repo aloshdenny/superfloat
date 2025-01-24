@@ -5,10 +5,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch.utils.data import DataLoader
 from datasets import Dataset
 from tqdm import tqdm
-import gc
-import os
-import numpy as np
 import copy
+import numpy as np
 
 class Superfloat:
     CASTING_TABLE = {
@@ -34,25 +32,12 @@ class Superfloat:
         self.max_val = 1 - 2**-self.mantissa_bits  # Precompute max representable value
         self.float_type = self.CASTING_TABLE[bits]  # Get float type based on bitwidth
 
-    def encode(self, value: torch.Tensor) -> torch.Tensor:
-        """Encodes a tensor of values into the superfloat format."""
-        clipped_value = torch.clamp(value, min=-self.max_val, max=self.max_val)
-        mantissa = (torch.abs(clipped_value) * (2**self.mantissa_bits - 1) / self.max_val).floor().to(torch.int32)
-        sign = (clipped_value < 0).to(torch.int32)
-        return (mantissa | (sign << self.mantissa_bits)).to(torch.int32)
-
-    def decode(self, encoded_value: torch.Tensor) -> torch.Tensor:
-        """Decodes a tensor of encoded superfloat values to regular floats."""
-        mantissa = encoded_value & ((1 << self.mantissa_bits) - 1)
-        sign = (encoded_value >> self.mantissa_bits) & 1
-        decoded_value = (mantissa.to(self.float_type) / (2**self.mantissa_bits - 1)) * self.max_val
-        return decoded_value * (2 * sign - 1)
-
-    def tensor_quantize(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Quantizes a tensor to the superfloat format and decodes back."""
-        encoded_tensor = self.encode(tensor)
-        decoded_tensor = self.decode(encoded_tensor)
-        return decoded_tensor
+    def quantize(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Quantizes a tensor to Superfloat format."""
+        # Per-channel scaling for dynamic range
+        scale = self.max_val / tensor.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-8)
+        quantized = torch.clamp(tensor * scale, -self.max_val, self.max_val).round()
+        return quantized / scale  # Dequantize for inference
 
 class LotteryTicketTrainer:
     def __init__(self, model, sf_quantizer, tokenizer, config):
@@ -68,7 +53,7 @@ class LotteryTicketTrainer:
         self.optimizer = optim.Adam(self.model.parameters(), lr=config.get('learning_rate', 1e-5), eps=config.get('optimizer_eps', 1e-4))
         self.loss_fn = nn.CrossEntropyLoss()
 
-    def prepare_dataset(self, max_length=2):
+    def prepare_dataset(self, max_length=512):
         dataset = Dataset.from_parquet('train.parquet')
         
         def tokenize_function(examples):
@@ -109,17 +94,30 @@ class LotteryTicketTrainer:
     def reset_to_winning_ticket(self, pruning_masks):
         for name, param in self.model.named_parameters():
             if name in pruning_masks:
-                mask = pruning_masks[name]
-                original_init = self.original_model_state[name]
-                param.data = original_init * mask
+                # Reset to original initialization, then apply mask
+                param.data.copy_(self.original_model_state[name])
+                param.data *= pruning_masks[name]
 
     def activation_magnitude_analysis(self):
-        # Placeholder: Implement activation magnitude analysis after each forward pass
-        layer_activation_changes = {}
-        for name, param in self.model.named_parameters():
-            # Analyze activation differences between the original and quantized models (per layer)
-            pass  # Here you would track activations before and after quantization
-        return layer_activation_changes
+        # Compare activations between original and quantized models
+        with torch.no_grad():
+            original_activations = self.get_activations(self.original_model_state)
+            quantized_activations = self.get_activations(self.model.state_dict())
+            return self.compute_layerwise_differences(original_activations, quantized_activations)
+
+    def get_activations(self, model_state):
+        # Placeholder: Implement forward pass to collect activations
+        activations = {}
+        for name, param in model_state.items():
+            if len(param.shape) > 1:
+                activations[name] = torch.mean(torch.abs(param)).item()
+        return activations
+
+    def compute_layerwise_differences(self, original_activations, quantized_activations):
+        differences = {}
+        for name in original_activations:
+            differences[name] = abs(original_activations[name] - quantized_activations[name])
+        return differences
 
     def fine_tune_based_on_activations(self, layer_activation_changes):
         # Fine-tune layers with significant activation change
