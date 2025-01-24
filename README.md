@@ -187,7 +187,7 @@ We would like to thank our sponsors for their support:
   <img src="https://pbs.twimg.com/profile_images/1848649662825406464/NFqR2OSK_400x400.jpg" width="200"/>
   <img src="https://media.licdn.com/dms/image/v2/D4E0BAQHKQl06Q7cd0A/company-logo_200_200/company-logo_200_200/0/1696367982134/modal_labs_logo?e=1743033600&v=beta&t=nMupgj5Hu8hl1mHyp0pDBJbqOEbGkRLmy7TZOTMuEZM" width="200"/>
   <img src="https://pbs.twimg.com/profile_images/1247800867777994755/JjEBNHba_400x400.jpg" width="200"/>
-  <img src="https://dat1.co/hs-fs/hubfs/photo_2024-06-14_19-48-12-1.jpg?width=114&height=75&name=photo_2024-06-14_19-48-12-1.jpg" width="200">
+  <img src="https://styles.redditmedia.com/t5_bxucfi/styles/profileIcon_xjiodpqbkvbd1.jpg?width=256&height=256&frame=1&auto=webp&crop=256:256,smart&s=bda66bfc6dae1682cf1e5351a48ae8e473e12203" width="200">
 </div>
 
 ---
