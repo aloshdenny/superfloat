@@ -183,17 +183,12 @@ Contributions are welcome! Feel free to open issues or submit pull requests.
 
 We would like to thank our sponsors for their support:
 
-### E2E Cloud
-<img src="https://pbs.twimg.com/profile_images/1848649662825406464/NFqR2OSK_400x400.jpg" width="200"/>
-
-### Modal
-<img src="https://media.licdn.com/dms/image/v2/D4E0BAQHKQl06Q7cd0A/company-logo_200_200/company-logo_200_200/0/1696367982134/modal_labs_logo?e=1743033600&v=beta&t=nMupgj5Hu8hl1mHyp0pDBJbqOEbGkRLmy7TZOTMuEZM" width="200"/>
-
-### Tencent
-<img src="https://pbs.twimg.com/profile_images/1247800867777994755/JjEBNHba_400x400.jpg" width="200"/>
-
-### dat1.co
-<img src="https://dat1.co/hs-fs/hubfs/photo_2024-06-14_19-48-12-1.jpg?width=114&height=75&name=photo_2024-06-14_19-48-12-1.jpg" width="200">
+<div style="display: flex; justify-content: space-between;">
+  <img src="https://pbs.twimg.com/profile_images/1848649662825406464/NFqR2OSK_400x400.jpg" width="200"/>
+  <img src="https://media.licdn.com/dms/image/v2/D4E0BAQHKQl06Q7cd0A/company-logo_200_200/company-logo_200_200/0/1696367982134/modal_labs_logo?e=1743033600&v=beta&t=nMupgj5Hu8hl1mHyp0pDBJbqOEbGkRLmy7TZOTMuEZM" width="200"/>
+  <img src="https://pbs.twimg.com/profile_images/1247800867777994755/JjEBNHba_400x400.jpg" width="200"/>
+  <img src="https://dat1.co/hs-fs/hubfs/photo_2024-06-14_19-48-12-1.jpg?width=114&height=75&name=photo_2024-06-14_19-48-12-1.jpg" width="200">
+</div>
 
 ---
 
