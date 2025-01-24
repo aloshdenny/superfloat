@@ -46,7 +46,7 @@ const ChatInterface = () => {
   };
 
   // Poll for results function
-  const pollForResults = async (requestId, maxAttempts = 20, interval = 6000) => {
+  const pollForResults = async (requestId, maxAttempts = 100, interval = 6000) => {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         const response = await makeApiRequest(
@@ -472,6 +472,7 @@ const ChatInterface = () => {
                 <option value="Qwen/Qwen2.5-1.5B">Qwen/Qwen2.5-1.5B</option>
                 <option value="meta-llama/Llama-3.2-1B">meta-llama/Llama-3.2-1B</option>
                 <option value="meta-llama/Llama-3.2-3B">meta-llama/Llama-3.2-3B</option>
+                <option value="meta-llama/Llama-3.1-8B">meta-llama/Llama-3.1-8B</option>
               </select>
             </div>
 
@@ -529,7 +530,7 @@ const ChatInterface = () => {
             {loading && (
               <div className="flex justify-center">
                 <div className="bg-[#1D1D1F] rounded-lg p-4 text-white">
-                  Processing request... This may take up to 2 minutes.
+                  Processing request... This may take up to 10 minutes.
                 </div>
               </div>
             )}

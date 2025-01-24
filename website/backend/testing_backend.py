@@ -46,7 +46,12 @@ model_mapping = {
         4: "meta-llama/Llama-3.2-3B",
         8: "meta-llama/Llama-3.2-3B",
         16: "meta-llama/Llama-3.2-3B"
-    }
+    },
+    "meta-llama/Llama-3.1-8B": {
+        4: "meta-llama/Llama-3.1-8B",
+        8: "meta-llama/Llama-3.1-8B",
+        16: "meta-llama/Llama-3.1-8B"
+    },
 }
 
 # Function to quantize the model
@@ -64,14 +69,14 @@ def zero_mean_quantize(tensor, bitwidth):
 
 def load_model(model_name, bitwidth, quantization_type, device):
     # Load the model in half-precision (torch.float16)
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16).to(device)
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16, use_safetensors=True).to(device)
     
     # Apply quantization
     for param in model.parameters():
         if quantization_type == 'WASQ-LTH':
-            param.data = absmax_quantize(param.data, bitwidth).to(torch.float16)  # Ensure quantization output is float16
+            param.data = absmax_quantize(param.data, bitwidth).to(torch.bfloat16)  # Ensure quantization output is float16
         elif quantization_type == 'WASQ-OPT':
-            param.data = zero_mean_quantize(param.data, bitwidth).to(torch.float16)  # Ensure quantization output is float16
+            param.data = zero_mean_quantize(param.data, bitwidth).to(torch.bfloat16)  # Ensure quantization output is float16
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=hf_token)
     return model, tokenizer
@@ -81,7 +86,7 @@ def measure_performance(model, tokenizer, input_text, device):
     inputs = tokenizer(input_text, return_tensors='pt').to(device)
     
     # Ensure input_ids remains as torch.long (integer)
-    inputs = {k: v.to(torch.long) if k == "input_ids" else v.to(torch.float16) for k, v in inputs.items()}
+    inputs = {k: v.to(torch.long) if k == "input_ids" else v.to(torch.bfloat16) for k, v in inputs.items()}
     
     start_time = time.time()
     with torch.no_grad():
@@ -131,7 +136,7 @@ image = (
     .pip_install("fastapi", "uvicorn", "transformers", "torch", "psutil", "pydantic")
 )
 
-app = modal.App(name="emelinlabs-runner", image=image)
+app = modal.App(name="emelinlabs-runners", image=image)
 
 def sanitize_float(value):
     """Ensure the value is a finite float and replace NaN/Infinity with 0.0."""
@@ -160,7 +165,7 @@ def run_inference(request: ModelRequest):
 
     # Load original model
     original_model = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch.float16
+        model_name, torch_dtype=torch.bfloat16, use_safetensors=True
     ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=hf_token)
 
