@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Send, Trash2, Edit2, ChevronRight, ChevronLeft, BarChart2, Check } from 'lucide-react';
+import { Send, Trash2, Edit2, ChevronRight, ChevronLeft, BarChart2, Check, Settings} from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
 const API_BASE_URL = {
@@ -10,7 +10,6 @@ const API_BASE_URL = {
 };
 
 const ChatInterface = () => {
-  // State management
   const [messages, setMessages] = useState([]);
   const [inputMessage, setInputMessage] = useState('');
   const [editingMessageId, setEditingMessageId] = useState(null);
@@ -21,8 +20,8 @@ const ChatInterface = () => {
   const [quantizationType, setQuantizationType] = useState('WASQ-OPT');
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
+  const [responseType, setResponseType] = useState('both');
 
-  // API request helper function
   const makeApiRequest = async (url, options) => {
     try {
       const response = await fetch(url, {
@@ -34,18 +33,14 @@ const ChatInterface = () => {
         },
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
       return await response.json();
     } catch (error) {
       console.error(`API request failed: ${error.message}`);
-      throw new Error(`API request failed: ${error.message}`);
+      throw error;
     }
   };
 
-  // Poll for results function
   const pollForResults = async (requestId, maxAttempts = 20, interval = 6000) => {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
@@ -53,91 +48,64 @@ const ChatInterface = () => {
           `${API_BASE_URL.GET_RESULT}?request_id=${requestId}`,
           { method: 'GET' }
         );
-        
-        if (response && response.original) {
-          return response;
-        }
+        if (response?.original) return response;
       } catch (error) {
         console.warn(`Polling attempt ${attempt + 1} failed:`, error);
       }
-      
       await new Promise(resolve => setTimeout(resolve, interval));
     }
     throw new Error('Timeout waiting for response');
   };
 
-  // Handle streaming responses
   const handleStreaming = (requestId) => {
     setStreaming(true);
+    const eventSources = [];
+    
+    if (responseType === 'both' || responseType === 'original') {
+      const originalEventSource = new EventSource(`${API_BASE_URL.STREAM_ORIGINAL}?request_id=${requestId}`);
+      eventSources.push(originalEventSource);
+      let originalText = '';
+      originalEventSource.onmessage = (event) => {
+        originalText += event.data + ' ';
+        setMessages(prev => updateMessageText(prev, 'original', originalText));
+      };
+    }
 
-    const originalEventSource = new EventSource(`${API_BASE_URL.STREAM_ORIGINAL}?request_id=${requestId}`);
-    const quantizedEventSource = new EventSource(`${API_BASE_URL.STREAM_QUANTIZED}?request_id=${requestId}`);
+    if (responseType === 'both' || responseType === 'quantized') {
+      const quantizedEventSource = new EventSource(`${API_BASE_URL.STREAM_QUANTIZED}?request_id=${requestId}`);
+      eventSources.push(quantizedEventSource);
+      let quantizedText = '';
+      quantizedEventSource.onmessage = (event) => {
+        quantizedText += event.data + ' ';
+        setMessages(prev => updateMessageText(prev, 'quantized', quantizedText));
+      };
+    }
 
-    let originalText = '';
-    let quantizedText = '';
-
-    originalEventSource.onmessage = (event) => {
-      originalText += event.data + ' ';
-      setMessages(prevMessages => {
-        const lastMessage = prevMessages[prevMessages.length - 1];
-        if (lastMessage && lastMessage.sender === 'bot') {
-          return [
-            ...prevMessages.slice(0, -1),
-            {
-              ...lastMessage,
-              metrics: {
-                ...lastMessage.metrics,
-                original: {
-                  ...lastMessage.metrics.original,
-                  text: originalText.trim(),
-                },
-              },
-            },
-          ];
-        }
-        return prevMessages;
-      });
-    };
-
-    quantizedEventSource.onmessage = (event) => {
-      quantizedText += event.data + ' ';
-      setMessages(prevMessages => {
-        const lastMessage = prevMessages[prevMessages.length - 1];
-        if (lastMessage && lastMessage.sender === 'bot') {
-          return [
-            ...prevMessages.slice(0, -1),
-            {
-              ...lastMessage,
-              metrics: {
-                ...lastMessage.metrics,
-                quantized: {
-                  ...lastMessage.metrics.quantized,
-                  text: quantizedText.trim(),
-                },
-              },
-            },
-          ];
-        }
-        return prevMessages;
-      });
-    };
-
-    originalEventSource.onerror = () => {
-      originalEventSource.close();
+    const errorHandler = () => {
+      eventSources.forEach(es => es.close());
       setStreaming(false);
     };
 
-    quantizedEventSource.onerror = () => {
-      quantizedEventSource.close();
-      setStreaming(false);
-    };
+    eventSources.forEach(es => es.onerror = errorHandler);
   };
 
-  // Run inference function
+  const updateMessageText = (prevMessages, type, text) => {
+    const lastMessage = prevMessages[prevMessages.length - 1];
+    return lastMessage?.sender === 'bot' ? [
+      ...prevMessages.slice(0, -1),
+      {
+        ...lastMessage,
+        metrics: {
+          ...lastMessage.metrics,
+          [type]: { ...lastMessage.metrics[type], text: text.trim() }
+        }
+      }
+    ] : prevMessages;
+  };
+
   const runInference = async (inputText) => {
     try {
       setLoading(true);
-
       const requestData = {
         model_name: selectedModel,
         quantization_bits: quantizationBits,
@@ -150,30 +118,27 @@ const ChatInterface = () => {
         body: JSON.stringify(requestData),
       });
 
-      if (!postResponse || !postResponse.request_id) {
-        throw new Error('Invalid response from server');
-      }
-
+      if (!postResponse?.request_id) throw new Error('Invalid response from server');
+      
       handleStreaming(postResponse.request_id);
-
       const results = await pollForResults(postResponse.request_id);
 
       return {
-        text: results.original.text,
+        text: responseType === 'quantized' ? results.quantized.text : results.original.text,
         metrics: {
-          original: {
+          original: responseType !== 'quantized' ? {
             text: results.original.text,
             inferenceTime: results.original.inference_time,
             memoryUsage: results.original.memory_usage,
             perplexity: results.original.perplexity
-          },
-          quantized: {
+          } : null,
+          quantized: responseType !== 'original' ? {
             text: results.quantized.text,
             inferenceTime: results.quantized.inference_time,
             memoryUsage: results.quantized.memory_usage,
             perplexity: results.quantized.perplexity
-          },
-          comparison: results.comparison
+          } : null,
+          comparison: responseType === 'both' ? results.comparison : null
         }
       };
     } catch (error) {
@@ -184,48 +149,12 @@ const ChatInterface = () => {
     }
   };
 
-  // Handle sending messages
-  const handleSend = async () => {
-    if (!inputMessage.trim() || loading) return;
-
-    const userMessage = {
-      id: Date.now(),
-      text: inputMessage,
-      sender: 'user',
-    };
-
-    try {
-      setMessages(prev => [...prev, userMessage]);
-      setInputMessage('');
-
-      const results = await runInference(inputMessage);
-      
-      const botMessage = {
-        id: Date.now() + 1,
-        text: results.text,
-        sender: 'bot',
-        metrics: results.metrics
-      };
-
-      setMessages(prev => [...prev, botMessage]);
-    } catch (error) {
-      const errorMessage = {
-        id: Date.now() + 1,
-        text: `Error: ${error.message}. Please try again later.`,
-        sender: 'bot',
-      };
-      setMessages(prev => [...prev, errorMessage]);
-    }
-  };
-
-  // Handle clearing messages
   const handleClear = () => {
     setMessages([]);
     setEditingMessageId(null);
     setEditingText('');
   };
 
-  // Handle starting edit mode
   const handleEdit = (messageId) => {
     const messageToEdit = messages.find(msg => msg.id === messageId);
     if (messageToEdit) {
@@ -234,68 +163,63 @@ const ChatInterface = () => {
     }
   };
 
+  const handleSend = async () => {
+    if (!inputMessage.trim() || loading) return;
+    const userMessage = { 
+      id: Date.now(), 
+      text: inputMessage, 
+      sender: 'user',
+      responseType: null // User messages don't need response type
+    };
+    
+    try {
+      setMessages(prev => [...prev, userMessage]);
+      setInputMessage('');
+      const results = await runInference(inputMessage);
+      
+      const botMessage = {
+        id: Date.now() + 1,
+        text: results.text,
+        sender: 'bot',
+        metrics: results.metrics,
+        responseType: responseType // Store current response type with message
+      };
+
+      setMessages(prev => [...prev, botMessage]);
+    } catch (error) {
+      const errorMessage = {
+        id: Date.now() + 1,
+        text: `Error: ${error.message}. Please try again later.`,
+        sender: 'bot',
+        responseType: responseType
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    }
+  };
+
   const handleSaveEdit = async (messageId) => {
     try {
-      // Find the edited message and its index
       const messageIndex = messages.findIndex(msg => msg.id === messageId);
       const editedMessage = messages[messageIndex];
-      
       if (messageIndex === -1 || editedMessage.sender !== 'user') return;
       
-      // Remove all messages that came after this message
       const updatedMessages = messages.slice(0, messageIndex + 1);
-      
-      // Update the edited message
-      updatedMessages[messageIndex] = {
-        ...editedMessage,
-        text: editingText
-      };
-      
+      updatedMessages[messageIndex] = { ...editedMessage, text: editingText };
       setMessages(updatedMessages);
       setEditingMessageId(null);
       setEditingText('');
       
-      // Generate new response
       setLoading(true);
-      
-      const requestData = {
-        model_name: selectedModel,
-        quantization_bits: quantizationBits,
-        quantization_type: quantizationType,
-        input_text: editingText,
-      };
-  
-      const postResponse = await makeApiRequest(API_BASE_URL.RUN_INFERENCE, {
-        method: 'POST',
-        body: JSON.stringify(requestData),
-      });
-  
-      if (!postResponse || !postResponse.request_id) {
-        throw new Error('Invalid response from server');
-      }
-  
-      const results = await pollForResults(postResponse.request_id);
-  
+      const results = await runInference(editingText);
+
       const botMessage = {
         id: Date.now(),
-        text: results.original.text,
+        text: results.text,
         sender: 'bot',
-        metrics: {
-          original: {
-            inferenceTime: results.original.inference_time,
-            memoryUsage: results.original.memory_usage,
-            perplexity: results.original.perplexity
-          },
-          quantized: {
-            text: results.quantized.text,
-            inferenceTime: results.quantized.inference_time,
-            memoryUsage: results.quantized.memory_usage,
-            perplexity: results.quantized.perplexity
-          },
-          comparison: results.comparison
-        }
+        metrics: results.metrics,
+        responseType: responseType // Store current response type with new message
       };
-  
+
       setMessages([...updatedMessages, botMessage]);
     } catch (error) {
       console.error('Error in handleSaveEdit:', error);
@@ -303,6 +227,7 @@ const ChatInterface = () => {
         id: Date.now(),
         text: `Error: ${error.message}. Please try again later.`,
         sender: 'bot',
+        responseType: responseType
       };
       setMessages(prev => [...prev, errorMessage]);
     } finally {
@@ -310,137 +235,176 @@ const ChatInterface = () => {
     }
   };
 
-  // Handle settings changes
-  const handleSettingsChange = async () => {
-    const lastUserMessage = [...messages].reverse().find(msg => msg.sender === 'user');
-    if (!lastUserMessage || loading) return;
+  const MessageBubble = ({ message, children }) => (
+    <div className={`p-4 rounded-2xl max-w-3xl ${
+      message.sender === 'user' 
+        ? 'bg-[#27272A] text-white ml-auto'
+        : 'bg-[#27272A] text-gray-100'
+    }`}>
+      {children}
+    </div>
+  );
 
-    try {
-      const results = await runInference(lastUserMessage.text);
-      
-      setMessages(prev => {
-        const lastBotMessageIndex = prev.findIndex(msg => 
-          msg.sender === 'bot' && 
-          prev.indexOf(lastUserMessage) < prev.indexOf(msg)
-        );
+  const MetricBadge = ({ label, value }) => (
+    <div className="flex items-center gap-2 bg-[#18181B] px-3 py-1.5 rounded-full">
+      <span className="text-xs text-[#A1A1AA]">{label}</span>
+      <span className="text-sm font-medium text-[#E4E4E7]">{value}</span>
+    </div>
+  );
 
-        if (lastBotMessageIndex === -1) return prev;
-
-        return prev.map((msg, index) =>
-          index === lastBotMessageIndex ? {
-            ...msg,
-            text: results.text,
-            metrics: results.metrics
-          } : msg
-        );
-      });
-    } catch (error) {
-      console.error('Error updating message after settings change:', error);
-    }
+  const ModelResponseSection = ({ title, text, metrics = {}, type }) => {
+    const [showMetrics, setShowMetrics] = useState(false);
+  
+    return (
+      <div className="space-y-4 relative group">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className={`h-2 w-2 rounded-full ${type === 'original' ? 'bg-green-500' : 'bg-purple-500'}`} />
+            <h3 className="font-semibold text-gray-200">{title}</h3>
+          </div>
+          <button 
+            onMouseEnter={() => setShowMetrics(true)}
+            onMouseLeave={() => setShowMetrics(false)}
+            className="p-1.5 text-[#A1A1AA] hover:text-white rounded-lg hover:bg-[#3F3F46] transition-colors"
+          >
+            <BarChart2 size={18} />
+          </button>
+        </div>
+  
+        <div className="prose prose-invert max-w-none text-gray-300">
+          <ReactMarkdown>{text}</ReactMarkdown>
+        </div>
+  
+        {/* Metrics Panel */}
+        {showMetrics && (
+          <div 
+            className="absolute top-8 right-0 z-10 p-4 bg-[#18181B] rounded-xl shadow-xl border border-[#3F3F46] w-64"
+            onMouseEnter={() => setShowMetrics(true)}
+            onMouseLeave={() => setShowMetrics(false)}
+          >
+            <div className="space-y-3">
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-[#A1A1AA]">Inference Time</span>
+                <span className="text-sm font-medium text-[#E4E4E7]">
+                  {metrics?.inferenceTime?.toFixed(2) || '0.00'}s
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-[#A1A1AA]">Memory Usage</span>
+                <span className="text-sm font-medium text-[#E4E4E7]">
+                  {metrics?.memoryUsage?.toFixed(2) || '0.00'}MB
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-[#A1A1AA]">Perplexity</span>
+                <span className="text-sm font-medium text-[#E4E4E7]">
+                  {metrics?.perplexity?.toFixed(2) || '0.00'}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
   };
 
-  // Settings change handlers
-  const handleModelChange = (e) => {
-    setSelectedModel(e.target.value);
-    handleSettingsChange();
-  };
 
-  const handleBitsChange = (e) => {
-    setQuantizationBits(parseInt(e.target.value));
-    handleSettingsChange();
-  };
-
-  const handleTypeChange = (e) => {
-    setQuantizationType(e.target.value);
-    handleSettingsChange();
-  };
-
-  // Message comparison component
+ 
   const MessageComparison = ({ message }) => {
     const [showStats, setShowStats] = useState(false);
 
     if (message.sender === 'user') {
       return (
-        <div className="flex justify-end mb-4">
-          <div className="group relative max-w-2xl">
-            {editingMessageId === message.id ? (
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={editingText}
-                  onChange={(e) => setEditingText(e.target.value)}
-                  className="flex-1 bg-[#1D1D1F] text-white rounded-lg p-4 border border-gray-600"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      handleSaveEdit(message.id);
-                    }
-                  }}
-                  autoFocus
-                />
-                <button
-                  onClick={() => handleSaveEdit(message.id)}
-                  className="p-2 bg-[#1D1D1F] text-white rounded-lg border border-gray-600 hover:bg-gray-500 transition-colors"
-                >
-                  <Check size={20} />
-                </button>
-              </div>
-            ) : (
-              <div className="bg-[#1D1D1F] text-white rounded-lg p-4 relative group">
-                {message.text}
-                <button
-                  onClick={() => handleEdit(message.id)}
-                  className="absolute right-2 top-2 p-1 text-gray-400 opacity-0 group-hover:opacity-100 hover:text-white hover:bg-gray-700 rounded transition-all"
-                >
-                  <Edit2 size={16} />
-                </button>
-              </div>
-            )}
+        <div className="group relative mb-6">
+          {editingMessageId === message.id ? (
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={editingText}
+                onChange={(e) => setEditingText(e.target.value)}
+                className="flex-1 bg-zinc-900 text-white rounded-xl p-3 border border-zinc-700 focus:ring-2 focus:ring-blue-500"
+                onKeyDown={(e) => e.key === 'Enter' && handleSaveEdit(message.id)}
+                autoFocus
+              />
+              <button
+                onClick={() => handleSaveEdit(message.id)}
+                className="p-2 bg-blue-500 text-white rounded-xl hover:bg-blue-600 transition-colors"
+              >
+                <Check size={20} />
+              </button>
+            </div>
+          ) : (
+            <div className="relative text-left">
+            <MessageBubble message={message}>
+              {message.text}
+            </MessageBubble>
+            <button
+              onClick={() => handleEdit(message.id)}
+              className="absolute -right-8 top-1/2 -translate-y-1/2 p-1.5 text-[#A1A1AA] hover:text-white transition-colors"
+            >
+              <Edit2 size={18} />
+            </button>
           </div>
+          )}
         </div>
       );
     }
 
     return (
-      <div className="relative w-full mb-4 bg-[#1D1D1F] p-6 rounded-lg">
-        <div className="grid grid-cols-2 gap-4">
-          {/* Original Text */}
-          <div className="space-y-2">
-            <h3 className="font-medium text-gray-200">Original Model</h3>
-            <div className="bg-[#1D1D1F] rounded-lg p-4 text-white whitespace-pre-wrap">
-              <ReactMarkdown className="prose prose-invert max-w-none">
-                {message.metrics?.original?.text || message.text}
-              </ReactMarkdown>
-            </div>
+      <div className="mb-6 space-y-6">
+        <div className="relative">
+          <div className={`grid gap-6 ${message.responseType === 'both' ? 'grid-cols-2' : 'grid-cols-1'}`}>
+            {message.responseType !== 'quantized' && (
+              <ModelResponseSection
+                title="Original Model"
+                text={message.metrics?.original?.text || message.text}
+                metrics={message.metrics?.original}
+                type="original"
+              />
+            )}
+
+            {message.responseType !== 'original' && (
+              <ModelResponseSection
+                title="Quantized Model"
+                text={message.metrics?.quantized?.text || message.text}
+                metrics={message.metrics?.quantized}
+                type="quantized"
+              />
+            )}
           </div>
 
-          {/* Quantized Text */}
-          <div className="space-y-2">
-            <h3 className="font-medium text-gray-200">Quantized Model</h3>
-            <div className="bg-[#1D1D1F] rounded-lg p-4 text-white whitespace-pre-wrap">
-              <ReactMarkdown className="prose prose-invert max-w-none">
-                {message.metrics?.quantized?.text || message.text}
-              </ReactMarkdown>
-            </div>
-          </div>
-
-          {/* Stats Button */}
-          {message.metrics?.comparison && (
-            <div className="absolute top-4 right-4">
+          {message.metrics?.comparison && message.responseType === 'both' && (
+            <div className="absolute top-0 right-0">
               <div className="relative">
                 <button
                   onMouseEnter={() => setShowStats(true)}
                   onMouseLeave={() => setShowStats(false)}
-                  className="p-2 bg-[#1D1D1F] hover:bg-gray-700 rounded-lg text-gray-300 hover:text-white transition-colors"
+                  className="p-2 bg-zinc-900 hover:bg-zinc-700 rounded-xl text-zinc-400 hover:text-white transition-colors"
                 >
                   <BarChart2 size={20} />
                 </button>
 
-                {/* Stats Popup */}
                 {showStats && (
-                  <div className="absolute right-0 mt-2 w-64 p-4 bg-[#1D1D1F] rounded-lg shadow-lg z-10">
-                    <div className="space-y-2 text-sm text-white">
-                      <p>Speed Improvement: {message.metrics.comparison.speed_diff.toFixed(2)}%</p>
-                      <p>Memory Savings: {message.metrics.comparison.memory_savings.toFixed(2)}%</p>
+                  <div className="absolute right-0 mt-2 w-64 p-4 bg-zinc-900 rounded-xl shadow-xl border border-zinc-700 z-10">
+                    <div className="space-y-3 text-sm">
+                      <div className="flex justify-between items-center">
+                        <span className="text-zinc-400">Speed:</span>
+                        <span className="text-green-500 font-medium">
+                          +{message.metrics.comparison.speed_diff.toFixed(2)}%
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-zinc-400">Memory:</span>
+                        <span className="text-purple-500 font-medium">
+                          -{message.metrics.comparison.memory_savings.toFixed(2)}%
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-zinc-400">Quality:</span>
+                        <span className="text-zinc-200 font-medium">
+                          {message.metrics.comparison.quality_diff.toFixed(2)}%
+                        </span>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -451,22 +415,22 @@ const ChatInterface = () => {
       </div>
     );
   };
-
   return (
-    <div className="h-screen flex bg-[#1D1D1F]">
-      {/* Settings Sidebar */}
-      <div className={`${sidebarOpen ? 'w-80' : 'w-0'} bg-black border-r border-gray-700 text-gray-300 transition-all duration-300 overflow-hidden`}>
+    <div className="h-screen flex bg-zinc-950">
+      <div className={`${sidebarOpen ? 'w-80' : 'w-0'} bg-zinc-900 border-r border-zinc-700 transition-all duration-300 overflow-hidden`}>
         <div className="p-6 space-y-8">
-          <div className="space-y-4">
-            <h2 className="text-xl font-semibold text-white">Settings</h2>
-            
-            {/* Model Selection */}
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-gray-300">Model</label>
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-gray-200">Model Settings</h2>
+            <Settings className="text-zinc-400" size={20} />
+          </div>
+          
+          <div className="space-y-6">
+            <div className="space-y-3">
+              <label className="text-sm font-medium text-gray-300">Model Selection</label>
               <select 
                 value={selectedModel}
-                onChange={handleModelChange}
-                className="w-full bg-[#1D1D1F] border border-gray-600 rounded-lg p-2 text-white"
+                onChange={(e) => setSelectedModel(e.target.value)}
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-xl p-3 text-gray-200 focus:ring-2 focus:ring-blue-500"
               >
                 <option value="Qwen/Qwen2.5-0.5B">Qwen/Qwen2.5-0.5B</option>
                 <option value="Qwen/Qwen2.5-1.5B">Qwen/Qwen2.5-1.5B</option>
@@ -475,95 +439,223 @@ const ChatInterface = () => {
               </select>
             </div>
 
-            {/* Quantization Bits Slider */}
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-gray-300">Quantization Bits</label>
+            <div className="space-y-4">
+              <div className="flex justify-between items-center">
+                <label className="text-sm font-medium text-gray-300">Quantization Bits</label>
+                <span className="text-sm text-blue-500">{quantizationBits} bits</span>
+              </div>
               <input
                 type="range"
                 min="2"
                 max="20"
                 value={quantizationBits}
-                onChange={handleBitsChange}
-                className="w-full h-2 bg-[#1D1D1F] rounded-lg appearance-none cursor-pointer"
+                onChange={(e) => setQuantizationBits(parseInt(e.target.value))}
+                className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
               />
-              <div className="text-center text-gray-300">{quantizationBits} bits</div>
             </div>
 
-            {/* Quantization Type Selection */}
-            <div className="space-y-2">
+            <div className="space-y-3">
               <label className="text-sm font-medium text-gray-300">Quantization Type</label>
-              <select
-                value={quantizationType}
-                onChange={handleTypeChange}
-                className="w-full bg-[#1D1D1F] border border-gray-600 rounded-lg p-2 text-white"
-              >
-                <option value="WASQ-OPT">WASQ-OPT</option>
-                <option value="WASQ-LTH">WASQ-LTH</option>
-              </select>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setQuantizationType('WASQ-OPT')}
+                  className={`p-2 rounded-lg text-sm ${
+                    quantizationType === 'WASQ-OPT'
+                      ? 'bg-blue-500 text-white'
+                      : 'bg-zinc-800 text-gray-300 hover:bg-zinc-700'
+                  }`}
+                >
+                  WASQ-OPT
+                </button>
+                <button
+                  onClick={() => setQuantizationType('WASQ-LTH')}
+                  className={`p-2 rounded-lg text-sm ${
+                    quantizationType === 'WASQ-LTH'
+                      ? 'bg-blue-500 text-white'
+                      : 'bg-zinc-800 text-gray-300 hover:bg-zinc-700'
+                  }`}
+                >
+                  WASQ-LTH
+                </button>
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Toggle Sidebar Button */}
-      <button
-        onClick={() => setSidebarOpen(!sidebarOpen)}
-        className="absolute left-0 top-4 bg-[#1D1D1F] text-gray-400 p-2 rounded-r-lg hover:bg-gray-800 transition-colors"
-      >
-        {sidebarOpen ? <ChevronLeft size={20} /> : <ChevronRight size={20} />}
-      </button>
+      <div className="flex-1 flex flex-col relative">
+        <button
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          className="absolute left-4 top-4 z-10 p-2 bg-zinc-900 text-zinc-400 hover:text-white rounded-xl hover:bg-zinc-700 transition-colors"
+        >
+          {sidebarOpen ? <ChevronLeft size={20} /> : <ChevronRight size={20} />}
+        </button>
 
-      {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
-        <div className="relative flex-1 p-6 overflow-y-auto">
-          <button 
-            onClick={handleClear}
-            className="absolute top-4 right-4 p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded-lg transition-colors"
-          >
-            <Trash2 size={20} />
-          </button>
-          <div className="space-y-6 pt-12">
+        <div className="flex-1 overflow-y-auto p-6 pt-16">
+          <div className="max-w-3xl mx-auto space-y-12">
             {messages.map((message) => (
               <MessageComparison key={message.id} message={message} />
             ))}
             {loading && (
               <div className="flex justify-center">
-                <div className="bg-[#1D1D1F] rounded-lg p-4 text-white">
-                  Processing request... This may take up to 2 minutes.
+                <div className="animate-pulse bg-zinc-900 rounded-xl p-4 text-gray-400">
+                  Generating response...
                 </div>
               </div>
             )}
           </div>
         </div>
 
-        {/* Input Area */}
-        <div className="border-t border-gray-700 bg-[#1D1D1F] p-6">
-          <div className="max-w-4xl mx-auto flex gap-4">
-            <input
-              value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
-                }
-              }}
-              placeholder="Type your message..."
-              className="flex-1 p-4 bg-[#1D1D1F] text-white rounded-lg border border-gray-600 focus:border-gray-400 focus:ring-0 transition-colors"
-              disabled={loading}
-            />
-            <button 
-              onClick={handleSend}
-              className="p-4 bg-[#1D1D1F] text-white rounded-lg hover:bg-gray-700 transition-colors disabled:bg-gray-700"
-              disabled={loading}
+        <div className="border-t border-zinc-700 bg-zinc-900 p-6">
+          <div className="max-w-3xl mx-auto flex gap-3">
+            <div className="flex gap-1 bg-zinc-800 p-1 rounded-xl">
+              {[ 'original', 'quantized', 'both'].map((type) => (
+                <button
+                  key={type}
+                  onClick={() => setResponseType(type)}
+                  className={`px-4 py-2 rounded-lg text-sm capitalize ${
+                    responseType === type
+                      ? 'bg-blue-500 text-white'
+                      : 'text-gray-400 hover:bg-zinc-700'
+                  }`}
+                >
+                  {type}
+                </button>
+              ))}
+            </div>
+            
+            <div className="flex-1 relative">
+              <input
+                value={inputMessage}
+                onChange={(e) => setInputMessage(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
+                placeholder="Message SuperFloat"
+                className="w-full pr-14 pl-4 py-3 bg-zinc-800 text-gray-200 rounded-xl border border-zinc-700 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                disabled={loading}
+              />
+              <button
+                onClick={handleSend}
+                disabled={loading}
+                className="absolute right-2 top-2 p-2 bg-blue-500 text-white rounded-xl hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <Send size={20} />
+              </button>
+            </div>
+            <button
+              onClick={handleClear}
+              className="p-3 text-zinc-400 hover:text-red-500 hover:bg-zinc-700 rounded-xl transition-colors"
             >
-              <Send size={20} />
+              <Trash2 size={20} />
             </button>
           </div>
         </div>
       </div>
     </div>
   );
+};
+
+// API interaction functions
+const makeApiRequest = async (url, options) => {
+  try {
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...options.headers,
+      },
+    });
+
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    console.error(`API request failed: ${error.message}`);
+    throw error;
+  }
+};
+
+const pollForResults = async (requestId, maxAttempts = 20, interval = 6000) => {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const response = await makeApiRequest(
+        `${API_BASE_URL.GET_RESULT}?request_id=${requestId}`,
+        { method: 'GET' }
+      );
+      if (response?.original) return response;
+    } catch (error) {
+      console.warn(`Polling attempt ${attempt + 1} failed:`, error);
+    }
+    await new Promise(resolve => setTimeout(resolve, interval));
+  }
+  throw new Error('Timeout waiting for response');
+};
+
+const handleStreaming = (requestId, responseType, updateMessageText) => {
+  const eventSources = [];
+  
+  if (responseType === 'both' || responseType === 'original') {
+    const originalEventSource = new EventSource(`${API_BASE_URL.STREAM_ORIGINAL}?request_id=${requestId}`);
+    eventSources.push(originalEventSource);
+    let originalText = '';
+    originalEventSource.onmessage = (event) => {
+      originalText += event.data + ' ';
+      updateMessageText('original', originalText.trim());
+    };
+  }
+
+  if (responseType === 'both' || responseType === 'quantized') {
+    const quantizedEventSource = new EventSource(`${API_BASE_URL.STREAM_QUANTIZED}?request_id=${requestId}`);
+    eventSources.push(quantizedEventSource);
+    let quantizedText = '';
+    quantizedEventSource.onmessage = (event) => {
+      quantizedText += event.data + ' ';
+      updateMessageText('quantized', quantizedText.trim());
+    };
+  }
+
+  return () => eventSources.forEach(es => es.close());
+};
+
+const runInference = async (inputText, selectedModel, quantizationBits, quantizationType, responseType) => {
+  try {
+    const requestData = {
+      model_name: selectedModel,
+      quantization_bits: quantizationBits,
+      quantization_type: quantizationType,
+      input_text: inputText,
+    };
+
+    const postResponse = await makeApiRequest(API_BASE_URL.RUN_INFERENCE, {
+      method: 'POST',
+      body: JSON.stringify(requestData),
+    });
+
+    if (!postResponse?.request_id) throw new Error('Invalid response from server');
+    
+    const results = await pollForResults(postResponse.request_id);
+
+    return {
+      text: responseType === 'quantized' ? results.quantized.text : results.original.text,
+      metrics: {
+        original: responseType !== 'quantized' ? {
+          text: results.original.text,
+          inferenceTime: results.original.inference_time,
+          memoryUsage: results.original.memory_usage,
+          perplexity: results.original.perplexity
+        } : null,
+        quantized: responseType !== 'original' ? {
+          text: results.quantized.text,
+          inferenceTime: results.quantized.inference_time,
+          memoryUsage: results.quantized.memory_usage,
+          perplexity: results.quantized.perplexity
+        } : null,
+        comparison: responseType === 'both' ? results.comparison : null
+      }
+    };
+  } catch (error) {
+    console.error('Error in runInference:', error);
+    throw error;
+  }
 };
 
 export default ChatInterface;
