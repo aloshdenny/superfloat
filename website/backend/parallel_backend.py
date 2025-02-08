@@ -67,18 +67,33 @@ def zero_mean_quantize(tensor, bitwidth):
     deq_tensor = q_tensor / (2**(bitwidth - 1) - 1) * scale + tensor.mean()
     return deq_tensor
 
-def load_model(model_name, bitwidth, quantization_type, device):
-    # Load the model in half-precision (torch.float16)
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16, use_safetensors=True).to(device)
-    
-    # Apply quantization
-    for param in model.parameters():
-        if quantization_type == 'WASQ-LTH':
-            param.data = absmax_quantize(param.data, bitwidth).to(torch.bfloat16)  # Ensure quantization output is float16
-        elif quantization_type == 'WASQ-OPT':
-            param.data = zero_mean_quantize(param.data, bitwidth).to(torch.bfloat16)  # Ensure quantization output is float16
+model_cache = {}
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=hf_token)
+def load_model(model_name, bitwidth, quantization_type, device):
+    # Create a unique key for the model based on its name, bitwidth, and quantization type
+    cache_key = (model_name, bitwidth, quantization_type)
+    
+    # Check if the model is already in the cache
+    if cache_key in model_cache:
+        print(f"Using cached model: {model_name} with bitwidth {bitwidth} and quantization type {quantization_type}")
+        model, tokenizer = model_cache[cache_key]
+    else:
+        print(f"Downloading and caching model: {model_name} with bitwidth {bitwidth} and quantization type {quantization_type}")
+        # Load the model in half-precision (torch.float16)
+        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16, use_safetensors=True).to(device)
+        
+        # Apply quantization
+        for param in model.parameters():
+            if quantization_type == 'WASQ-LTH':
+                param.data = absmax_quantize(param.data, bitwidth).to(torch.bfloat16)  # Ensure quantization output is float16
+            elif quantization_type == 'WASQ-OPT':
+                param.data = zero_mean_quantize(param.data, bitwidth).to(torch.bfloat16)  # Ensure quantization output is float16
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=hf_token)
+        
+        # Cache the model
+        model_cache[cache_key] = (model, tokenizer)
+    
     return model, tokenizer
 
 def measure_performance(model, tokenizer, input_text, device):

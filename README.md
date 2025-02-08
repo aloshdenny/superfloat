@@ -183,14 +183,12 @@ Contributions are welcome! Feel free to open issues or submit pull requests.
 
 We would like to thank our sponsors for their support:
 
-### E2E Cloud
-<img src="https://scontent.fgoi1-1.fna.fbcdn.net/v/t39.30808-6/420082473_781490844014447_5654924958047860859_n.jpg?_nc_cat=106&ccb=1-7&_nc_sid=6ee11a&_nc_ohc=qwFXhKMqcBgQ7kNvgGLY0Jg&_nc_oc=AdjHBuyEgp_LZmRxscpCxJro65_r7Ov90uKAbLtZ0WySF5t0k07sziFvAGz4CG5MBwEODvEUQHxfiDi1wRvNTOS7&_nc_zt=23&_nc_ht=scontent.fgoi1-1.fna&_nc_gid=A7ga0MxLvcynDXkIiptpkvG&oh=00_AYDrm-mCrls8IhEkPypspoRkQWxxUv5N4MUhoMerJcHxbQ&oe=6772AFBA" width="200"/>
-
-### Modal
-<img src="https://media.licdn.com/dms/image/v2/D4E0BAQHKQl06Q7cd0A/company-logo_200_200/company-logo_200_200/0/1696367982134/modal_labs_logo?e=1743033600&v=beta&t=nMupgj5Hu8hl1mHyp0pDBJbqOEbGkRLmy7TZOTMuEZM" width="200"/>
-
-### Tencent
-<img src="https://scontent.fgoi1-1.fna.fbcdn.net/v/t39.30808-6/302281205_558600909394999_8110792235021631070_n.jpg?_nc_cat=109&ccb=1-7&_nc_sid=6ee11a&_nc_ohc=iRYYAsQovaUQ7kNvgGxatAb&_nc_oc=AdiCU8ypyoIzJqAmOzvagx5zI9D4ftov4yHrDqV8jPIwzT2VLDd33XqFzwUnkN1VIt2c5qsk909KHgimIOR9wzMx&_nc_zt=23&_nc_ht=scontent.fgoi1-1.fna&_nc_gid=ACrV0XjTCxwksBiZKRgh2_F&oh=00_AYC3J3R7qzdXCFIcmOmAJ78Rhzq_QEJv-TME49RjDnHjKQ&oe=6772AFD1" width="200"/>
+<div style="display: flex; justify-content: space-between;">
+  <img src="https://pbs.twimg.com/profile_images/1848649662825406464/NFqR2OSK_400x400.jpg" width="200"/>
+  <img src="https://media.licdn.com/dms/image/v2/D4E0BAQHKQl06Q7cd0A/company-logo_200_200/company-logo_200_200/0/1696367982134/modal_labs_logo?e=1743033600&v=beta&t=nMupgj5Hu8hl1mHyp0pDBJbqOEbGkRLmy7TZOTMuEZM" width="200"/>
+  <img src="https://pbs.twimg.com/profile_images/1247800867777994755/JjEBNHba_400x400.jpg" width="200"/>
+  <img src="https://styles.redditmedia.com/t5_bxucfi/styles/profileIcon_xjiodpqbkvbd1.jpg?width=256&height=256&frame=1&auto=webp&crop=256:256,smart&s=bda66bfc6dae1682cf1e5351a48ae8e473e12203" width="200">
+</div>
 
 ---
 
