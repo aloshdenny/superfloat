@@ -175,11 +175,25 @@ The results folder contains:
 
 ## **Chip-1: Atreides**
 
-Atreides is an ASIC accelerator designed specifically for Superfloat-based inference. We redesigned the systolic array to support SFx operations, adopting a modded RV32 ISA and faster Fused-Multiply-Adder (FMA) units. The end goal is not convention - it's breaking the rules of computing and physics to achieve faster inference, lower memory consumption, and the same accuracy.
+Atreides is an ASIC accelerator designed specifically for Superfloat-based inference. We redesigned the systolic array to support SFx operations, adopting a modded RV32 ISA and faster Fused-Multiply-Adder (FMA) units. The end goal is not convention—it's breaking the rules of computing and physics to achieve faster inference, lower memory consumption, and the same accuracy.
 
-Here's an FMA in Atreides:
+## FMA in Atreides
+
+Below is an image showing the FMA in Atreides:
+
+![FMA](results/FMA.png)
+
+## Expanded View of Chip-1's Architecture
 
 An expanded view of Chip-1's architecture includes non-unified memory blocks (subject to unification), cache, control store (modded RV32 ISA), and an array of FMAs:
+
+![Chip-1 Architecture](results/hardware%20architecture.png)
+
+## FPGA Floorplan
+
+The current floorplan for the FPGA design is shown below:
+
+![FPGA Floorplan](results/floorplan.png)
 
 ## **Contributions**
 
