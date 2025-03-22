@@ -140,8 +140,8 @@ The repository explores three quantization approaches:
 Clone the repository and install dependencies:
 
 ```bash
-git clone <repo-url>
-cd <repo-folder>
+git clone https://github.com/aloshdenny/superfloat
+cd superfloat
 pip install -r requirements.txt
 ```
 
@@ -172,6 +172,14 @@ The results folder contains:
 - Supplementary studies showcasing model performance.
 
 ---
+
+## **Chip-1: Atreides**
+
+Atreides is an ASIC accelerator designed specifically for Superfloat-based inference. We redesigned the systolic array to support SFx operations, adopting a modded RV32 ISA and faster Fused-Multiply-Adder (FMA) units. The end goal is not convention - it's breaking the rules of computing and physics to achieve faster inference, lower memory consumption, and the same accuracy.
+
+Here's an FMA in Atreides:
+
+An expanded view of Chip-1's architecture includes non-unified memory blocks (subject to unification), cache, control store (modded RV32 ISA), and an array of FMAs:
 
 ## **Contributions**
 
