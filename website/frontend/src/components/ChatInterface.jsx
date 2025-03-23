@@ -41,12 +41,7 @@ const ChatInterface = () => {
     }
   };
 
-<<<<<<< HEAD
-  // Poll for results function
-  const pollForResults = async (requestId, maxAttempts = 100, interval = 6000) => {
-=======
   const pollForResults = async (requestId, maxAttempts = 20, interval = 6000) => {
->>>>>>> 13e8bad77676836a378020fd3af242b37b8a4b31
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         const response = await makeApiRequest(
@@ -504,13 +499,8 @@ const ChatInterface = () => {
             ))}
             {loading && (
               <div className="flex justify-center">
-<<<<<<< HEAD
-                <div className="bg-[#1D1D1F] rounded-lg p-4 text-white">
-                  Processing request... This may take up to 10 minutes.
-=======
                 <div className="animate-pulse bg-zinc-900 rounded-xl p-4 text-gray-400">
                   Generating response...
->>>>>>> 13e8bad77676836a378020fd3af242b37b8a4b31
                 </div>
               </div>
             )}
