@@ -210,6 +210,42 @@ The current floorplan for the FPGA design is shown below:
 
 ![FPGA Floorplan](results/floorplan.png)
 
+### FPGA Functional Units Design
+
+#### 1. 8 x 16-bit Shift Register (simplified)
+
+![FPGA Floorplan](results/shift_register.png)
+
+#### 2. Activation Unit (simplified)
+
+![FPGA Floorplan](results/activation_unit.png)
+
+#### 3. Cycle Count Logic
+
+![FPGA Floorplan](results/cycle_count_logic.png)
+
+## Instruction Set
+
+The current instruction set for the FPGA architecture is show below:
+
+| Instruction | Opcode(4) | Op 1(4) | Op 2(4) | Op 3(4) | Description                                                                           |
+|-------------|-----------|---------|---------|---------|---------------------------------------------------------------------------------------|
+| STR         | 0001      | addr    | row     | col     | Stores the matrix data from activation unit buffer into specified address in memory   |
+| LDR         | 0010      | addr    | row     | col     | Loads the matrix at addr into the Row Shift Buffer                                    |
+| LDC         | 0011      | addr    | row     | col     | Loads the matrix at addr into the Column Shift Buffer                                 |
+| MATMUL      | 0100      | -       | -       | -       | Performs matrix multiplication using data in Row Shift Buffer and Column Shift Buffer |
+| RELU        | 0101      | -       | -       | -       | Performs ReLU activation function on Systolic Array output                            |
+| LIN         | 0110      | -       | -       | -       | Performs Linear activation function on Systolic Array output                          |
+| NOP         | 0000      | -       | -       | -       | No Operation                                                                          |
+
+
+### FPGA floorplan (ISA integrated)
+
+The FPGA floorplan integrated with instruction set is shown below:
+
+
+![FPGA Floorplan](results/isa_integrated_floorplan.png)
+
 ## **Contributions**
 
 Contributions are welcome! Feel free to open issues or submit pull requests.
