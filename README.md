@@ -204,12 +204,6 @@ An expanded view of Chip-1's architecture includes non-unified memory blocks (su
 
 ![Chip-1 Architecture](results/hardware%20architecture.png)
 
-## FPGA Floorplan
-
-The current floorplan for the FPGA design is shown below:
-
-![FPGA Floorplan](results/floorplan.png)
-
 ### FPGA Functional Units Design
 
 #### 1. 8 x 16-bit Shift Register (simplified)
