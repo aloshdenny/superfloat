@@ -1,153 +1,272 @@
-# SuperFloat: Accelerators for AI on Edge. Reimagined.
+# **SuperFloat: Accelerators for AI on Edge. Reimagined.**
 
-![SuperFloat Logo](https://via.placeholder.com/150x50) <!-- Add actual logo if available -->
-
-This repository contains cutting-edge quantization techniques combining **Superfloat Quantization**, **Weight-aware Selective Quantization (WASQ)**, and **Simulated Annealing Multi-Prize Lottery Ticket Hypothesis (SA-MPLTH)** for optimizing neural networks on edge devices.
+This repository contains the code, methods, and scripts for implementing **Superfloat Quantization** and **Lottery Ticket Hypothesis (LTH)** techniques for optimizing neural networks. The repository focuses on various quantization algorithms, model evaluations, and fine-tuning techniques to minimize perplexity and stabilize activations.
 
 ---
 
-## Key Innovations
+## **What is Superfloat?**  
 
-### 🚀 SuperFloat Quantization
-A revolutionary numeric format that:
-- Uses **sign-exponent only** representation (no mantissa)
-- Operates within clamped `[-1, 1]` range for stability
-- Supports **3-bit to 16-bit** precision
-- Enables **74% memory reduction** in LLMs
+**Superfloat** is a custom quantization algorithm that operates with a **scalable precision format**. Unlike traditional floating-point systems (e.g., IEEE-754), Superfloat removes the mantissa entirely and focuses solely on the **exponent** for precision representation.  
 
-### ⚡ WASQ Framework
-Our Weight-aware Selective Quantization system featuring:
-- 6 optimization algorithms (Vanilla to SA-MPLTH)
-- Hardware-aware quantization
-- RISC-V compatible instruction set
-- **2.2× speedup** over conventional GPUs
+### **Key Features**:  
+1. **Sign-Exponent Representation**:  
+   - Superfloat (SFx) uses `1 bit` for the **sign** and allocates the remaining `x-1 bits` for the **exponent**.  
+   - For instance, in **SF16**:  
+     - 1 bit → Sign  
+     - 15 bits → Exponent  
 
-### 🏆 SA-MPLTH Algorithm
-Our novel three-pass quantization healing process:
-1. **Subnetwork Prospecting**: Identifies robust quantized subnetworks
-2. **Gradient-Guided Healing**: Fine-tunes with simulated annealing
-3. **Ensemble Fusion**: Combines complementary subnetworks
+2. **Clamping Range**:  
+   - All values are clamped within the range `[-1, 1]`. This ensures activation and parameter stability, reducing the likelihood of exploding or vanishing gradients.
 
----
+3. **Bit-width Flexibility**:  
+   - Superfloat supports variable precision formats, scaling between **3-bit and 16-bit**:  
+     - Lower precision (e.g., **SF4**) → Faster computation, reduced model size.  
+     - Higher precision (e.g., **SF16**) → Improved accuracy while maintaining efficient quantization.
 
-## Chip-1: Atreides Accelerator
+4. **Gradient and Activation Capping**:  
+   - To stabilize the training process, gradients and activations are **capped** at -1 and +1.
 
-Our custom ASIC designed for Superfloat inference:
-
-### Hardware Architecture
-![Chip-1 Architecture](results/hardware%20architecture.png)
-
-### Key Components
-- **Fused Multiply-Add (FMA) Units**
-  ![FMA Unit](results/FMA.png)
-- **Non-Unified Memory Architecture**
-- **Modified RV32 ISA** with custom instructions:
-  
-  | Instruction | Opcode | Description |
-  |------------|--------|-------------|
-  | MATMUL | 0100 | Matrix multiplication |
-  | SFQUANT | 0111 | Superfloat quantization |
-  | RELU | 0101 | Activation function |
-
-### Performance
-- **10.6 tokens/sec** on Raspberry Pi 5
-- **74% memory reduction** for DeepSeek-R1
-- **2.2× speedup** vs conventional GPUs
+### **Advantages of Superfloat**:  
+- Saves **precision** without a significant drop in accuracy.  
+- Reduces **computational complexity** compared to traditional floating-point representations.  
+- Allows adaptive scaling for diverse quantization requirements.
 
 ---
 
-## Implementation Highlights
+**Conversion FP32 - SF(4-16)**
 
-### Quantization Algorithms
-| Algorithm | Use Case | Key Feature |
-|-----------|----------|-------------|
-| WASQ-Vanilla | Baseline | Simple SF8 quantization |
-| WASQ-FPM | High accuracy | Full parameter retraining |
-| SA-MPLTH | Optimal healing | Simulated annealing + LTH |
+A standard 32-bit floating-point number is converted into a custom superfloat representation with a variable-sized mantissa.
 
-### Code Structure
-```
-superfloat/
-├── core/                  # Core quantization algorithms
-│   ├── superfloat.py      # Superfloat datatype implementation
-│   ├── wasq_opt.py        # WASQ optimized quantizer
-│   └── sa_mplth.py        # SA-MPLTH implementation
-├── hardware/              # Atreides accelerator designs
-│   ├── fma/               # Fused Multiply-Add units
-│   └── isa/               # Modified RISC-V ISA
-├── models/                # Quantized model zoo
-├── scripts/               # Training/evaluation scripts
-└── results/               # Benchmark results
-```
+- **Clamp Input Range** – The input value is restricted to the range (-1, 1). If the value exceeds this, it is set to a predefined maximum value.
+    
+- **Extract Sign Bit** – The sign bit is determined and stored separately, while the value is converted to its absolute form.
+    
+- **Compute Mantissa** – The fractional value is scaled by `2^mantissa_bits` to convert it into an integer representation.
+    
+- **Bit Packing** – The sign bit and mantissa are arranged into a custom format, with the mantissa shifted to fit within a float-sized bit structure.
+    
+- **Bitwise Reinterpretation** – The constructed bit pattern is reinterpreted as a floating-point number and returned.
+
+---
+## **What is WASQ?**  
+
+**WASQ** stands for **Weight and Activation Superfloat Quantization**. It is a **hybrid quantization framework** that leverages Superfloat precision to optimize both model weights and activations.
+
+### **Key Characteristics of WASQ**:  
+1. **Weight Quantization**:  
+   - Model weights are converted to **Superfloat precision** (SFx) without requiring complex computations like mantissa adjustments.  
+
+2. **Activation Quantization**:  
+   - Activations are clamped and quantized within a stable range to prevent issues such as exploding activations.
+
+3. **Optimization Algorithms**:  
+   - WASQ includes customized algorithms like **WASQ OPT** and **Full Parameter Method (FPM)** to balance accuracy and convergence speed.
+   - New: **Simulated Annealing Multi-Prize Lottery Ticket (SA-MPLTH)** algorithm for healing quantized models
+
+4. **Scalability**:  
+   - WASQ supports **multi-bit quantization** (from 4-bit to 16-bit), making it adaptable for different deployment environments, such as:  
+     - **Edge devices** → Lower precision for speed and memory savings.  
+     - **Servers** → Higher precision for accuracy-sensitive tasks.
+
+### **WASQ + Lottery Ticket Hypothesis (LTH)**  
+WASQ integrates **LTH** to identify specific weights that are critical for maintaining model performance after quantization. By fine-tuning only the **essential weights**, WASQ reduces computational overhead while achieving high accuracy.
 
 ---
 
-## Getting Started
+## **Files Overview**
 
-### Installation
+1. **[Quant_Dequant.ipynb](Quant_Dequant.ipynb)**  
+   Contains the implementation of basic Superfloat quantization and dequantization functions.
+
+2. **[sf16quant.ipynb](sf16quant.ipynb)**  
+   Builds on Superfloat quantization functions, specifically for **SF16 precision**.
+
+3. **[lth_analysis.py](lth_analysis.py)**  
+   Analyzes **activation magnitude distribution** for **LTH**. It compares activation patterns of original and quantized models.
+
+4. **[lth_trainer.py](lth_trainer.py)**  
+   The **LTH trainer** script for fine-tuning models based on the Lottery Ticket Hypothesis technique.
+
+5. **[wasq_eval.py](wasq_eval.py)**  
+   Calculates **perplexity** for a series of models, grouped by context length, epochs, or model species.
+
+6. **[wasq_inference.py](wasq_inference.py)**  
+   Provides inference capabilities for **individual** or **multiple WASQ-quantized models**.
+
+7. **[wasq_fasteropt.py](wasq_fasteropt.py)**  
+   An optimized version of the **OPT algorithm** implemented in `wasq_opt.py`.
+
+8. **[wasq_opt.py](wasq_opt.py)**  
+   Core implementation of the WASQ OPT algorithm.
+
+9. **[wasq_fpm.py](wasq_fpm.py)**  
+   Implements the **Full Parameter Method** (FPM) for WASQ quantization.
+
+10. **[wasq_vanilla.py](wasq_vanilla.py)**  
+    Baseline implementation of the **Vanilla algorithm** for WASQ.
+
+11. **[sa_mplth.py](sa_mplth.py)**  
+    New: Implements Simulated Annealing Multi-Prize Lottery Ticket Hypothesis for healing quantized models.
+
+12. **[results](results/)**  
+    Contains outputs of model tests, perplexity scores, and supplementary studies.
+
+---
+
+## **Scaling Laws**
+
+### 1. **Maximum Context Length Barrier - Perplexity Factor**  
+For a model with `n` parameters, a calibration dataset of maximum input length `c`, **three-shot quantization fine-tuning**, and Superfloat precision bit `x` (where `4 ≤ x ≤ 16`):  
+
+\[
+P = f(n, c, 3, x)
+\]
+
+- **Lower P** indicates better model understanding and calibration performance.
+
+---
+
+### 2. **Maximum Neuron Spread Factor**  
+This scaling law uses the **Lottery Ticket Hypothesis** for WASQ quantization to stabilize activations:
+
+1. Perform a forward pass using the **original model** and record the average magnitudes of activations across all layers.  
+2. Perform the same for the **vanilla quantized model** to observe how quantization impacts activation magnitudes.  
+3. Rank layers based on the **difference in activation magnitudes** between the original and quantized models.  
+4. Identify and **cluster layers** with significant deviations to address issues like exploding/vanishing activations.  
+5. Fine-tune or analyze these clusters to ensure stable activations and minimal performance degradation.
+
+The law establishes that the **maximum neuron spread** (region targeted for fine-tuning/updating) is a function of:  
+- **Activation magnitude**  
+- **Activation fracture** (spread of how a weight affects neighboring weights during backpropagation)
+
+---
+
+## **Quantization Algorithms**
+
+The repository explores three quantization approaches:
+
+1. **Superfloat Precision**: Custom precision without mantissa, clamped within `[-1, 1]` for stability.  
+2. **WASQ OPT**: Optimized quantization with faster convergence.  
+3. **Full Parameter Method (FPM)**: Retrains all parameters for higher accuracy.
+4. **SA-MPLTH**: New simulated annealing approach for healing quantized models.
+
+---
+
+## **Usage**
+
+### **Setup**  
+Clone the repository and install dependencies:
+
 ```bash
-git clone https://github.com/aloshdenny/superfloat-accelerator
-cd superfloat-accelerator
+git clone https://github.com/aloshdenny/superfloat
+cd superfloat
 pip install -r requirements.txt
 ```
 
-### Basic Usage
-```python
-from core.superfloat import Superfloat
-from core.sa_mplth import SA_MPLTH_Trainer
+### **Running Scripts**  
 
-# Initialize 8-bit Superfloat quantizer
-quantizer = Superfloat(bits=8)
+- Train with **LTH**:  
+   ```bash
+   python lth_trainer.py
+   ```
 
-# Load model and setup SA-MPLTH trainer
-trainer = SA_MPLTH_Trainer(
-    model=your_model,
-    sf_quantizer=quantizer,
-    config={
-        'initial_temp': 1.0,
-        'final_temp': 0.01,
-        'pruning_rates': [0.7, 0.8, 0.9]
-    }
-)
+- Evaluate Perplexity:  
+   ```bash
+   python wasq_eval.py
+   ```
 
-# Run quantization-aware training
-optimized_model = trainer.train()
-```
----
+- Perform Inference:  
+   ```bash
+   python wasq_inference.py
+   ```
 
-## Performance Results
-
-### Quantization Comparison
-| Model | FP32 Size | SF8 Size | Perplexity Δ | Speedup |
-|-------|-----------|----------|--------------|---------|
-| DeepSeek-R1 | 28GB | 7.4GB | +0.9 | 10.6x |
-| Llama 3.2 | 32GB | 9.3GB | +1.1 | 6.95x |
-| Gemma-3 | 24GB | 10.1GB | +0.8 | 10.4x |
-
-### SA-MPLTH Effectiveness
-![Perplexity Improvement](results/perplexity_improvement.png) <!-- Add actual graph -->
+- Run SA-MPLTH:  
+   ```bash
+   python sa_mplth.py
+   ```
 
 ---
 
-## Roadmap
-- [ ] Dynamic bit-width adjustment
-- [ ] Neuromorphic integration
-- [ ] Community-driven SF type extensions
-- [ ] Atreides tapeout (2025 Q2)
+## **Results**
+
+The results folder contains:  
+- **Perplexity scores** for different model configurations.  
+- **Activation magnitude comparisons** before and after quantization.  
+- Supplementary studies showcasing model performance.
 
 ---
 
-## Sponsors & Acknowledgments
+## **Chip-1: Atreides**
+
+Atreides is an ASIC accelerator designed specifically for Superfloat-based inference. We redesigned the systolic array to support SFx operations, adopting a modded RV32 ISA and faster Fused-Multiply-Adder (FMA) units. The end goal is not convention—it's breaking the rules of computing and physics to achieve faster inference, lower memory consumption, and the same accuracy.
+
+## FMA in Atreides
+
+Below is an image showing the FMA in Atreides:
+
+![FMA](results/FMA.png)
+
+## Expanded View of Chip-1's Architecture
+
+An expanded view of Chip-1's architecture includes non-unified memory blocks (subject to unification), cache, control store (modded RV32 ISA), and an array of FMAs:
+
+![Chip-1 Architecture](results/hardware%20architecture.png)
+
+### FPGA Functional Units Design
+
+#### 1. 8 x 16-bit Shift Register (simplified)
+
+![FPGA Floorplan](results/shift_register.png)
+
+#### 2. Activation Unit (simplified)
+
+![FPGA Floorplan](results/activation_unit.png)
+
+#### 3. Cycle Count Logic
+
+![FPGA Floorplan](results/cycle_count_logic.png)
+
+## Instruction Set
+
+The current instruction set for the FPGA architecture is show below:
+
+| Instruction | Opcode(4) | Op 1(4) | Op 2(4) | Op 3(4) | Description                                                                           |
+|-------------|-----------|---------|---------|---------|---------------------------------------------------------------------------------------|
+| STR         | 0001      | addr    | row     | col     | Stores the matrix data from activation unit buffer into specified address in memory   |
+| LDR         | 0010      | addr    | row     | col     | Loads the matrix at addr into the Row Shift Buffer                                    |
+| LDC         | 0011      | addr    | row     | col     | Loads the matrix at addr into the Column Shift Buffer                                 |
+| MATMUL      | 0100      | -       | -       | -       | Performs matrix multiplication using data in Row Shift Buffer and Column Shift Buffer |
+| RELU        | 0101      | -       | -       | -       | Performs ReLU activation function on Systolic Array output                            |
+| LIN         | 0110      | -       | -       | -       | Performs Linear activation function on Systolic Array output                          |
+| NOP         | 0000      | -       | -       | -       | No Operation                                                                          |
+
+### FPGA floorplan (ISA integrated)
+
+The FPGA floorplan integrated with instruction set is shown below:
+
+![FPGA Floorplan](results/isa_integrated_floorplan.png)
+
+---
+
+## **Contributions**
+
+Contributions are welcome! Feel free to open issues or submit pull requests.
+
+---
+
+## **Sponsors**
+
+We would like to thank our sponsors for their support:
+
 <div style="display: flex; justify-content: space-between;">
-  <img src="assets/sponsor1.png" width="150"/>
-  <img src="assets/sponsor2.png" width="150"/>
-  <img src="assets/sponsor3.png" width="150"/>
+  <img src="https://pbs.twimg.com/profile_images/1848649662825406464/NFqR2OSK_400x400.jpg" width="200"/>
+  <img src="https://media.licdn.com/dms/image/v2/D4E0BAQHKQl06Q7cd0A/company-logo_200_200/company-logo_200_200/0/1696367982134/modal_labs_logo?e=1743033600&v=beta&t=nMupgj5Hu8hl1mHyp0pDBJbqOEbGkRLmy7TZOTMuEZM" width="200"/>
+  <img src="https://pbs.twimg.com/profile_images/1247800867777994755/JjEBNHba_400x400.jpg" width="200"/>
+  <img src="https://styles.redditmedia.com/t5_bxucfi/styles/profileIcon_xjiodpqbkvbd1.jpg?width=256&height=256&frame=1&auto=webp&crop=256:256,smart&s=bda66bfc6dae1682cf1e5351a48ae8e473e12203" width="200">
 </div>
 
-Special thanks to Dr. Pramod Pavithran and Cochin University of Science and Technology for research support.
-
 ---
 
-## License
-MIT License © 2025 Alosh Denny @ EmelinLabs
-```
+## **License**
+
+This project is licensed under the MIT License.
