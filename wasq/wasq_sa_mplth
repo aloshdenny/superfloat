@@ -1,5 +1,3 @@
-# WASQ Simulated Annealing Multi-Prize Lottery Ticket Hypothesis (SA-MPLTH)
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -129,10 +127,16 @@ class SA_MPLTH_Trainer:
                     param.data = self.sf_quantizer.quantize(param.data)
 
     def evaluate_subnetwork(self, model, dataloader, subnetwork_idx):
-        """Evaluates subnetwork performance"""
+        """Evaluates subnetwork performance on validation set"""
         model.eval()
         total_loss = 0
         total_tokens = 0
+        
+        # Apply the subnetwork mask before evaluation
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                if name in self.winning_tickets[subnetwork_idx]:
+                    param.data.copy_(self.winning_tickets[subnetwork_idx][name])
         
         with torch.no_grad():
             for batch in dataloader:
@@ -157,9 +161,11 @@ class SA_MPLTH_Trainer:
         
         avg_loss = total_loss / total_tokens
         perplexity = math.exp(avg_loss)
+        
+        print(f"Subnetwork {subnetwork_idx} validation perplexity: {perplexity:.2f}")
         return perplexity
 
-    def train_subnetwork(self, model, dataloader, masks, subnetwork_idx, num_epochs=3):
+    def train_subnetwork(self, model, dataloader, val_dataloader, masks, subnetwork_idx, num_epochs=3):
         """Trains a single subnetwork with quantization-aware training"""
         best_perplexity = float('inf')
         
@@ -204,8 +210,8 @@ class SA_MPLTH_Trainer:
                 epoch_loss += loss.item()
                 progress_bar.set_postfix({"loss": f"{loss.item():.4f}", "temp": f"{self.current_temp:.4f}"})
             
-            # Evaluate after each epoch
-            current_perplexity = self.evaluate_subnetwork(model, dataloader, subnetwork_idx)
+            # Evaluate on validation set after each epoch
+            current_perplexity = self.evaluate_subnetwork(model, val_dataloader, subnetwork_idx)
             if current_perplexity < best_perplexity:
                 best_perplexity = current_perplexity
                 torch.save(model.state_dict(), f"best_subnet_{subnetwork_idx}.pth")
@@ -214,14 +220,15 @@ class SA_MPLTH_Trainer:
 
     def merge_subnetworks(self, model, subnetworks):
         """Merges multiple subnetworks using learned weights"""
-        # Implement your merging strategy here
-        # This could be simple averaging or more sophisticated methods
         merged_state = copy.deepcopy(self.original_model_state)
         
         for name in merged_state:
             if any(name in sub for sub in subnetworks.values()):
                 weights = [sub[name] for sub in subnetworks.values() if name in sub]
-                merged_state[name] = torch.stack(weights).mean(dim=0)
+                # Weighted average based on subnetwork scores (better subnetworks get more weight)
+                weights = torch.stack(weights)
+                scores = torch.tensor([1/self.subnetwork_scores[i] for i in range(len(weights))])
+                merged_state[name] = (weights * scores.view(-1, 1, 1)).sum(dim=0) / scores.sum()
         
         model.load_state_dict(merged_state)
         return model
@@ -230,7 +237,7 @@ class SA_MPLTH_Trainer:
         """Main training loop for SA-MPLTH"""
         # Prepare data
         tokenized_dataset = self.prepare_dataset()
-        dataloader = self.create_dataloader(tokenized_dataset)
+        train_dataloader = self.create_dataloader(tokenized_dataset)
         val_dataloader = self.create_dataloader(tokenized_dataset, batch_size=8)  # Smaller batch for validation
         
         # Generate initial subnetworks
@@ -247,10 +254,11 @@ class SA_MPLTH_Trainer:
             # Apply quantization and noise
             self.apply_quantization_noise(submodel, subnetworks, subnetwork_idx)
             
-            # Train the subnetwork
+            # Train the subnetwork with validation
             perplexity = self.train_subnetwork(
                 submodel,
-                dataloader,
+                train_dataloader,
+                val_dataloader,  # Now passing validation dataloader
                 subnetworks,
                 subnetwork_idx,
                 num_epochs=self.config.get('subnetwork_epochs', 3)
@@ -265,17 +273,18 @@ class SA_MPLTH_Trainer:
         print("\nMerging subnetworks...")
         merged_model = self.merge_subnetworks(self.model, self.winning_tickets)
         
-        # Final fine-tuning of merged model
+        # Final fine-tuning of merged model with validation
         print("Final fine-tuning...")
         best_perplexity = self.train_subnetwork(
             merged_model,
-            dataloader,
+            train_dataloader,
+            val_dataloader,  # Using validation for final model
             {},  # No masking for final training
             "final",
             num_epochs=self.config.get('final_epochs', 5)
         )
         
-        print(f"\nTraining complete! Final perplexity: {best_perplexity:.2f}")
+        print(f"\nTraining complete! Final validation perplexity: {best_perplexity:.2f}")
         return merged_model
 
 def main():
