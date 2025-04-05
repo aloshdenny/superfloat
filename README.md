@@ -1,5 +1,3 @@
----
-
 # **SuperFloat: Accelerators for AI on Edge. Reimagined.**
 
 This repository contains the code, methods, and scripts for implementing **Superfloat Quantization** and **Lottery Ticket Hypothesis (LTH)** techniques for optimizing neural networks. The repository focuses on various quantization algorithms, model evaluations, and fine-tuning techniques to minimize perplexity and stabilize activations.
@@ -37,7 +35,7 @@ This repository contains the code, methods, and scripts for implementing **Super
 
 **Conversion FP32 - SF(4-16)**
 
-a standard 32-bit floating-point number is converted into a custom superfloat representation with a variable-sized mantissa.
+A standard 32-bit floating-point number is converted into a custom superfloat representation with a variable-sized mantissa.
 
 - **Clamp Input Range** – The input value is restricted to the range (-1, 1). If the value exceeds this, it is set to a predefined maximum value.
     
@@ -63,6 +61,7 @@ a standard 32-bit floating-point number is converted into a custom superfloat re
 
 3. **Optimization Algorithms**:  
    - WASQ includes customized algorithms like **WASQ OPT** and **Full Parameter Method (FPM)** to balance accuracy and convergence speed.
+   - New: **Simulated Annealing Multi-Prize Lottery Ticket (SA-MPLTH)** algorithm for healing quantized models
 
 4. **Scalability**:  
    - WASQ supports **multi-bit quantization** (from 4-bit to 16-bit), making it adaptable for different deployment environments, such as:  
@@ -106,7 +105,10 @@ WASQ integrates **LTH** to identify specific weights that are critical for maint
 10. **[wasq_vanilla.py](wasq_vanilla.py)**  
     Baseline implementation of the **Vanilla algorithm** for WASQ.
 
-11. **[results](results/)**  
+11. **[sa_mplth.py](sa_mplth.py)**  
+    New: Implements Simulated Annealing Multi-Prize Lottery Ticket Hypothesis for healing quantized models.
+
+12. **[results](results/)**  
     Contains outputs of model tests, perplexity scores, and supplementary studies.
 
 ---
@@ -146,6 +148,7 @@ The repository explores three quantization approaches:
 1. **Superfloat Precision**: Custom precision without mantissa, clamped within `[-1, 1]` for stability.  
 2. **WASQ OPT**: Optimized quantization with faster convergence.  
 3. **Full Parameter Method (FPM)**: Retrains all parameters for higher accuracy.
+4. **SA-MPLTH**: New simulated annealing approach for healing quantized models.
 
 ---
 
@@ -175,6 +178,11 @@ pip install -r requirements.txt
 - Perform Inference:  
    ```bash
    python wasq_inference.py
+   ```
+
+- Run SA-MPLTH:  
+   ```bash
+   python sa_mplth.py
    ```
 
 ---
@@ -232,13 +240,13 @@ The current instruction set for the FPGA architecture is show below:
 | LIN         | 0110      | -       | -       | -       | Performs Linear activation function on Systolic Array output                          |
 | NOP         | 0000      | -       | -       | -       | No Operation                                                                          |
 
-
 ### FPGA floorplan (ISA integrated)
 
 The FPGA floorplan integrated with instruction set is shown below:
 
-
 ![FPGA Floorplan](results/isa_integrated_floorplan.png)
+
+---
 
 ## **Contributions**
 
@@ -262,5 +270,3 @@ We would like to thank our sponsors for their support:
 ## **License**
 
 This project is licensed under the MIT License.
-
----
