@@ -6,7 +6,7 @@ from datasets import load_dataset, Dataset
 from tqdm import tqdm
 import gc
 
-max_length = 2
+max_length = 512
 bit = 8
 
 class Superfloat:
@@ -81,7 +81,13 @@ class QuantizedLlamaModel(torch.nn.Module):
         return x
 
 # Initialize model and tokenizer
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
+
 print(f"Using device: {device}")
 
 model_name = "Qwen/Qwen2-0.5B"
@@ -101,7 +107,7 @@ def quantize_model(model, sf_type):
 import os
 import re
 
-def load_checkpoint(model, sf_bits, suffix="opt", device="cuda"):
+def load_checkpoint(model, sf_bits, suffix="opt", device=device):
     """
     Load the latest checkpoint based on the provided Superfloat bitwidth and filename suffix.
 
@@ -161,12 +167,16 @@ print(f"Resuming training from epoch {last_epoch + 1}.")
 check_parameters_in_range(quantized, sf)
 
 del model
-torch.cuda.empty_cache()
+if device=="cuda":
+    torch.cuda.empty_cache()
+elif device=="mps":
+    torch.mps.empty_cache()
 gc.collect()
 
 # Prepare Dataset
 def prepare_dataset(tokenizer, max_length=1):
-    dataset = Dataset.from_parquet('train.parquet')
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+    # dataset = Dataset.from_parquet('train.parquet')
     def tokenize_function(examples):
         return tokenizer(
             examples["text"],
@@ -186,7 +196,7 @@ def collate_fn(batch):
 
 # Prepare tokenized dataset and dataloader
 tokenized_dataset = prepare_dataset(tokenizer, max_length=max_length)
-train_dataloader = DataLoader(tokenized_dataset, batch_size=1, shuffle=True, collate_fn=collate_fn)
+train_dataloader = DataLoader(tokenized_dataset, batch_size=4, shuffle=True, collate_fn=collate_fn)
 
 # Optimizer and Loss
 optimizer = torch.optim.Adam(quantized.parameters(), lr=1e-5, eps=1e-4)
@@ -194,7 +204,7 @@ loss_fn = torch.nn.CrossEntropyLoss()
 
 # Training Loop
 num_epochs = 3
-accumulation_steps = 32  # Number of steps to accumulate gradients
+accumulation_steps = 8  # Number of steps to accumulate gradients
 best_loss = float('inf')
 
 quantized.to(device)

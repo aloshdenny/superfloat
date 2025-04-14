@@ -39,9 +39,18 @@ class Superfloat:
         quantized = torch.clamp(tensor * scale, -self.max_val, self.max_val).round()
         return quantized / scale  # Dequantize for inference
 
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
+
+print(f"Using device: {device}")
+
 class LotteryTicketTrainer:
     def __init__(self, model, sf_quantizer, tokenizer, config):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
         self.sf_quantizer = sf_quantizer
         self.model = model.to(device=self.device, dtype=sf_quantizer.float_type)
         self.tokenizer = tokenizer

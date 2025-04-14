@@ -71,7 +71,13 @@ def check_model_quantization(model, sf_type):
 
 # Load model
 model_name = "Qwen/Qwen2-0.5B"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
+
 print(f"Using device: {device}")
 
 model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')

@@ -1,3 +1,4 @@
+models--*
 .locks/
 .env
 frontend/node_modules/

@@ -78,7 +78,13 @@ class QuantizedLlamaModel(torch.nn.Module):
         return x
 
 # Initialize model and tokenizer
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
+
 print(f"Using device: {device}")
 
 model_name = "meta-llama/Llama-3.2-1B"
@@ -98,7 +104,7 @@ def quantize_model(model, sf_type):
 import os
 import re
 
-def load_checkpoint(model, sf_bits, suffix="opt", device="cuda"):
+def load_checkpoint(model, sf_bits, suffix="opt", device=device):
     """
     Load the latest checkpoint based on the provided Superfloat bitwidth and filename suffix.
 
@@ -142,7 +148,10 @@ quantized, last_epoch = load_checkpoint(model, sf.bits, suffix="opt", device=dev
 print(f"Resuming training from epoch {last_epoch + 1}.")
 
 del model
-torch.cuda.empty_cache()
+if device=="cuda":
+    torch.cuda.empty_cache()
+if device=="mps":
+    torch.mps.empty_cache()
 gc.collect()
 
 # Prepare Dataset

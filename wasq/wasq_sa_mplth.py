@@ -41,9 +41,18 @@ class Superfloat:
             quantized = torch.clamp(tensor * scale, -self.max_val, self.max_val)
             return quantized / scale
 
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
+
+print(f"Using device: {device}")
+
 class SA_MPLTH_Trainer:
     def __init__(self, model, sf_quantizer, tokenizer, config):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
         self.sf_quantizer = sf_quantizer
         self.model = model.to(device=self.device, dtype=sf_quantizer.float_type)
         self.tokenizer = tokenizer
@@ -182,7 +191,7 @@ class SA_MPLTH_Trainer:
                 inputs = batch['input_ids'].to(self.device)
                 masks = batch['attention_mask'].to(self.device)
                 
-                with torch.cuda.amp.autocast(enabled=self.config.get('mixed_precision', True)):
+                with torch.cuda.amp.autocast(device_type=device, enabled=self.config.get('mixed_precision', True)):
                     outputs = model(input_ids=inputs, attention_mask=masks)
                     logits = outputs.logits
                     

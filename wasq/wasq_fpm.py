@@ -1,4 +1,11 @@
 import torch
+from transformers import LlamaForCausalLM, PreTrainedTokenizerFast
+import os
+import re
+import gc
+from torch.utils.data import DataLoader
+from datasets import load_dataset, Dataset
+from tqdm import tqdm
 
 class Superfloat:
     CASTING_TABLE = {
@@ -71,9 +78,13 @@ class QuantizedLlamaModel(torch.nn.Module):
             x = self.sf_quantizer.tensor_quantize(layer(x))
         return x
 
-from transformers import LlamaForCausalLM, PreTrainedTokenizerFast
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # Initialize model and tokenizer
@@ -105,10 +116,7 @@ def check_model_quantization(model, sf_type):
             all_parameters_valid = False
     return all_parameters_valid
 
-import os
-import re
-
-def load_checkpoint(model, sf_bits, suffix="fpm", device="cuda"):
+def load_checkpoint(model, sf_bits, suffix="fpm", device=device):
     """
     Load the latest checkpoint based on the provided Superfloat bitwidth and filename suffix.
     
@@ -152,18 +160,19 @@ quantized, last_epoch = load_checkpoint(model, sf.bits, suffix="fpm", device=dev
 print(f"Resuming training from epoch {last_epoch + 1}.")
 
 del model
-torch.cuda.empty_cache()
-import gc
+if device=='cuda':
+    # Clear CUDA cache to free up memory
+    torch.cuda.empty_cache()
+elif device=='mps':
+    # Clear MPS cache to free up memory
+    torch.mps.empty_cache()
 gc.collect()
-
-from torch.utils.data import DataLoader
-from datasets import load_dataset, Dataset
 
 # Prepare Dataset
 def prepare_dataset(tokenizer, max_length=512):
     """Prepare the dataset with proper tensor formatting."""
-    # dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-    dataset = Dataset.from_parquet('train.parquet')
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+    # dataset = Dataset.from_parquet('train.parquet')
     def tokenize_function(examples):
         outputs = tokenizer(
             examples["text"],
@@ -192,18 +201,16 @@ def collate_fn(batch):
         'attention_mask': attention_mask
     }
 
-# Prepare tokenized dataset and dataloader
-tokenized_dataset = prepare_dataset(tokenizer)
-train_dataloader = DataLoader(tokenized_dataset, batch_size=1, shuffle=True, collate_fn=collate_fn)
-
-from tqdm import tqdm
-
 # Optimizer and Loss
 optimizer = torch.optim.Adam(quantized.parameters(), lr=1e-5, eps=1e-4)
 loss_fn = torch.nn.CrossEntropyLoss()
 
+# Prepare tokenized dataset and dataloader
+tokenized_dataset = prepare_dataset(tokenizer)
+train_dataloader = DataLoader(tokenized_dataset, batch_size=4, shuffle=True, collate_fn=collate_fn)
+
 num_epochs = 3
-accumulation_steps = 32  # Number of steps to accumulate gradients
+accumulation_steps = 8  # Number of steps to accumulate gradients
 best_loss = float('inf')
 
 quantized.to(device)
