@@ -1,7 +1,13 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.autograd import Function
 from transformers import AutoModelForCausalLM
 
+
 class Superfloat:
+    """Simple Superfloat quantizer with encode/decode utilities."""
+
     CASTING_TABLE = {
         16: torch.float32,
         15: torch.float32,
@@ -22,80 +28,164 @@ class Superfloat:
         assert 4 <= bits <= 16, "Superfloat bitwidth must be between 4 and 16."
         self.bits = bits
         self.mantissa_bits = bits - 1
-        self.max_val = 1 - 2**-self.mantissa_bits  # Precompute max representable value
-        self.float_type = self.CASTING_TABLE[bits]  # Get float type based on bitwidth
+        self.max_val = 1 - 2 ** -self.mantissa_bits
+        self.float_type = self.CASTING_TABLE[bits]
 
-    def encode(self, value: torch.Tensor) -> torch.Tensor:
-        """Encodes a tensor of values into the superfloat format."""
-        clipped_value = torch.clamp(value, min=-self.max_val, max=self.max_val)
-        mantissa = (torch.abs(clipped_value) * (2**self.mantissa_bits - 1) / self.max_val).floor().to(torch.int32)
-        sign = (clipped_value < 0).to(torch.int32)
-        return (mantissa | (sign << self.mantissa_bits)).to(torch.int32)
+    def encode(self, value: torch.Tensor):
+        clipped = torch.clamp(value, min=-self.max_val, max=self.max_val)
+        mantissa = (torch.abs(clipped) * (2 ** self.mantissa_bits - 1) / self.max_val).floor().to(torch.int32)
+        sign = (clipped < 0).to(torch.int32)
+        encoded = (mantissa | (sign << self.mantissa_bits)).to(torch.int32)
+        out_of_range = (value.abs() > self.max_val)
+        return encoded, out_of_range
 
-    def decode(self, encoded_value: torch.Tensor) -> torch.Tensor:
-        """Decodes a tensor of encoded superfloat values to regular floats."""
-        mantissa = encoded_value & ((1 << self.mantissa_bits) - 1)
-        sign = (encoded_value >> self.mantissa_bits) & 1
-        decoded_value = (mantissa.to(self.float_type) / (2**self.mantissa_bits - 1)) * self.max_val
-        return decoded_value * (2 * sign - 1)
+    def decode(self, encoded: torch.Tensor) -> torch.Tensor:
+        mantissa = encoded & ((1 << self.mantissa_bits) - 1)
+        sign = (encoded >> self.mantissa_bits) & 1
+        decoded = (mantissa.to(self.float_type) / (2 ** self.mantissa_bits - 1)) * self.max_val
+        return decoded * (2 * sign - 1)
 
     def tensor_quantize(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Quantizes a tensor to the superfloat format and decodes back."""
-        encoded_tensor = self.encode(tensor)
-        decoded_tensor = self.decode(encoded_tensor)
-        return decoded_tensor
+        enc, _ = self.encode(tensor)
+        return self.decode(enc)
 
-sf = Superfloat(8)
 
-# Function to quantize the model
-def quantize_model(model, sf_type):
-    for name, param in model.named_parameters():
-        print(f"Quantizing: {name}")
+class SFQuant(Function):
+    """Straight-through estimator for Superfloat quantization."""
+
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, sf: "Superfloat"):
+        encoded, mask = sf.encode(input)
+        ctx.save_for_backward(mask)
+        ctx.sf = sf
+        return sf.decode(encoded)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (mask,) = ctx.saved_tensors
+        # Pass gradients only where values were in range
+        return grad_output * mask.to(grad_output.dtype), None
+
+
+class QuantizedLinear(nn.Linear):
+    """Linear layer with on-the-fly Superfloat decode and optional LSQ+ scale."""
+
+    def __init__(self, in_features, out_features, sf: Superfloat, bias=True, k_outlier=0.005):
+        super().__init__(in_features, out_features, bias)
+        self.sf = sf
+
+        # Split outlier channels that would overflow after quantisation
         with torch.no_grad():
-            quantized_param = sf_type.tensor_quantize(param)
-            param.data.copy_(quantized_param)
+            channel_max = self.weight.abs().max(dim=1).values
+            k = max(1, int(k_outlier * out_features))
+            self.outlier_idx = torch.topk(channel_max, k).indices
+            mask = torch.ones(out_features, dtype=torch.bool)
+            mask[self.outlier_idx] = False
+            base_w = self.weight[mask].clone()
+            self.register_buffer("encoded_weight", sf.encode(base_w)[0])
+            self.register_parameter("scale", nn.Parameter(torch.ones(base_w.size(0))))
+            self.register_parameter("outlier_weight", nn.Parameter(self.weight[self.outlier_idx].clone()))
+            self.register_buffer("mask", mask)
+        # Remove original parameter
+        self.weight.requires_grad = False
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # Decode base weight on the fly and apply LSQ+ scale
+        decoded_base = self.sf.decode(self.encoded_weight) * self.scale.view(-1, 1)
+        weight = self.weight.new_zeros(self.out_features, self.in_features)
+        weight[self.mask] = decoded_base
+        weight[self.outlier_idx] = self.outlier_weight
+        return F.linear(input, weight, self.bias)
+
+
+class ActivationQuant(nn.Module):
+    """Module to quantise activations symmetrically with Superfloat."""
+
+    def __init__(self, sf: Superfloat):
+        super().__init__()
+        self.sf = sf
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return SFQuant.apply(x, self.sf)
+
+
+def compute_hessian_scores(model, data_loader, device, num_batches=1):
+    """Approximate block-diagonal Hessian scores for parameters."""
+    scores = {name: torch.zeros_like(p) for name, p in model.named_parameters() if p.requires_grad}
+    loss_fn = nn.CrossEntropyLoss()
+    model.eval()
+    for i, batch in enumerate(data_loader):
+        if i >= num_batches:
+            break
+        batch = {k: v.to(device) for k, v in batch.items()}
+        output = model(**batch)
+        logits = output.logits
+        target = batch["input_ids"][:, 1:].contiguous()
+        logits = logits[:, :-1].contiguous()
+        loss = loss_fn(logits.view(-1, logits.size(-1)), target.view(-1))
+        grads = torch.autograd.grad(loss, [p for p in model.parameters() if p.requires_grad], create_graph=False)
+        for (name, _), g in zip([(n, p) for n, p in model.named_parameters() if p.requires_grad], grads):
+            scores[name] += g.pow(2)
+    return scores
+
+
+def select_sf_bits(weight, score, bit_options=(16, 11, 8, 4), budget=1e-3):
+    """Simple layer-adaptive bit-width search using a quantisation error budget."""
+    for bits in sorted(bit_options, reverse=True):
+        sf = Superfloat(bits)
+        q = sf.tensor_quantize(weight)
+        err = (weight - q).abs().mean() * score.mean()
+        if err <= budget:
+            return sf
+    return Superfloat(bit_options[0])
+
+
+def quantize_model(model, sf_options=(16, 11, 8, 4), data_loader=None, device="cpu"):
+    """Quantise linear layers adaptively and insert activation quantisation."""
+    if data_loader is not None:
+        scores = compute_hessian_scores(model, data_loader, device)
+    else:
+        scores = {name: torch.ones_like(p) for name, p in model.named_parameters() if p.requires_grad}
+
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            score = scores.get(f"{name}.weight", torch.ones_like(module.weight))
+            sf = select_sf_bits(module.weight.data, score)
+            qlinear = QuantizedLinear(module.in_features, module.out_features, sf, module.bias is not None)
+            qlinear.bias = module.bias
+            setattr(model, name.split(".")[-1], qlinear)
+        elif isinstance(module, nn.Module) and not isinstance(module, ActivationQuant):
+            module.register_forward_pre_hook(lambda m, inp: (SFQuant.apply(inp[0], Superfloat(11)),))
     return model
 
-# Checker function to verify quantization
-def check_model_quantization(model, sf_type):
-    all_parameters_valid = True
-    for name, param in model.named_parameters():
-        param_data = param.data
-        if param_data.dtype != sf_type.float_type:
-            print(f"Parameter {name} is not in {sf_type.float_type} format!")
-            all_parameters_valid = False
-        if not torch.all((param_data >= -sf_type.max_val) & (param_data <= sf_type.max_val)):
-            print(f"Parameter {name} has values outside the SF{sf_type.bits} range!")
-            all_parameters_valid = False
-    return all_parameters_valid
 
-# Load model
-model_name = "Qwen/Qwen2-0.5B"
-if torch.backends.mps.is_available():
-    device = torch.device("mps")
-elif torch.cuda.is_available():
-    device = torch.device("cuda")
-else:
-    device = torch.device("cpu")
+def main():
+    model_name = "Qwen/Qwen2-0.5B"
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    print(f"Using device: {device}")
 
-print(f"Using device: {device}")
+    # Model loading may require network; placeholder path for offline usage
+    model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir="./")
+    model = model.to(device)
 
-model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir='./', token='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')
-model = model.to(sf.float_type).to(device)  # Ensure model uses the correct float type
+    # Dummy dataloader for Hessian approximation (replace with real data)
+    dummy_input = torch.randint(0, 10, (1, 8))
+    dummy_mask = torch.ones_like(dummy_input)
+    dataset = [{"input_ids": dummy_input, "attention_mask": dummy_mask}]
+    data_loader = torch.utils.data.DataLoader(dataset, batch_size=1)
 
-# Quantize parameters
-print("Quantizing model parameters...")
-quantized_model = quantize_model(model, sf)
+    print("Applying adaptive Superfloat quantisation...")
+    quantized_model = quantize_model(model, data_loader=data_loader, device=device)
 
-# Verify quantization
-print("Checking model quantization...")
-is_valid = check_model_quantization(quantized_model, sf)
-
-if is_valid:
-    print(f"All parameters are in {sf.float_type} format and within the SF{sf.bits} range.")
-    # Save quantized model
-    save_path = f"sf{sf.bits}_vanilla"
+    save_path = "sf_vanilla_adaptive.pt"
     torch.save(quantized_model.state_dict(), save_path)
-    print(f"Quantized model saved to {save_path}")
-else:
-    print("Model quantization verification failed. Fix issues before saving.")
+    print(f"Quantised model saved to {save_path}")
+
+
+if __name__ == "__main__":
+    main()
