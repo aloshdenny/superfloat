@@ -8,6 +8,7 @@ import gc
 
 max_length = 512
 bit = 8
+ERROR_BUDGET = 0.01  # maximum allowed relative quantization error per layer
 
 class Superfloat:
     CASTING_TABLE = {
@@ -56,29 +57,107 @@ class Superfloat:
 
 sf = Superfloat(bit)
 
+
+class SFQuantFunction(torch.autograd.Function):
+    """Straight-through estimator for Superfloat quantisation."""
+
+    @staticmethod
+    def forward(ctx, tensor, sf_obj):
+        encoded, mask = sf_obj.encode(tensor)
+        ctx.save_for_backward(mask)
+        ctx.sf_obj = sf_obj
+        return sf_obj.decode(encoded)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (mask,) = ctx.saved_tensors
+        return grad_output * mask.to(grad_output.dtype), None
+
+
+class QuantizedLinear(nn.Module):
+    """Linear layer with weights encoded once and decoded on-the-fly."""
+
+    def __init__(self, linear: nn.Linear, sf_bits: int):
+        super().__init__()
+        self.sf = Superfloat(sf_bits)
+        self.in_features = linear.in_features
+        self.out_features = linear.out_features
+        self.bias = nn.Parameter(linear.bias.detach()) if linear.bias is not None else None
+        self.register_buffer("encoded_weight", None)
+        self.register_buffer("outlier_mask", None)
+        self.register_buffer("outlier_values", None)
+        # learnable per-channel scale (LSQ+ style)
+        self.scale = nn.Parameter(torch.ones(linear.out_features, dtype=self.sf.float_type))
+        self.encode_weight(linear.weight)
+
+    def encode_weight(self, weight, outlier_percent=0.5):
+        # Encode once and split top-k outliers
+        encoded, mask = self.sf.encode(weight)
+        if outlier_percent:
+            k = max(1, int(outlier_percent / 100.0 * weight.numel()))
+            thresh = torch.topk(weight.abs().view(-1), k).values[-1]
+            mask |= weight.abs() >= thresh
+        self.encoded_weight = encoded
+        self.outlier_mask = mask
+        self.outlier_values = weight[mask]
+
+    def forward(self, x):
+        w = self.sf.decode(self.encoded_weight)
+        if self.outlier_mask.any():
+            w = w.clone()
+            w[self.outlier_mask] = self.outlier_values
+        w = w * self.scale.unsqueeze(1)
+        x = SFQuantFunction.apply(x, self.sf)
+        return nn.functional.linear(x, w, self.bias)
+
+
+def quant_error(weight: torch.Tensor, sf_bits: int) -> float:
+    sf_tmp = Superfloat(sf_bits)
+    quant, _ = sf_tmp.tensor_quantize(weight)
+    return torch.norm(weight - quant) / torch.norm(weight)
+
+
+def search_layer_bitwidth(weight: torch.Tensor, bits_list) -> int:
+    for b in sorted(bits_list):
+        if quant_error(weight, b) <= ERROR_BUDGET:
+            return b
+    return max(bits_list)
+
+
+def quantize_linear_layers(model, bits_candidates):
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            chosen = search_layer_bitwidth(module.weight.data, bits_candidates)
+            qlin = QuantizedLinear(module, chosen)
+            parent = model
+            name_parts = name.split('.')
+            for n in name_parts[:-1]:
+                parent = getattr(parent, n)
+            setattr(parent, name_parts[-1], qlin)
+
 class QuantizedLlamaModel(torch.nn.Module):
     def __init__(self, base_model: torch.nn.Module, sf_quantizer: Superfloat):
         super(QuantizedLlamaModel, self).__init__()
         self.base_model = base_model
         self.sf_quantizer = sf_quantizer
+        # Replace Linear layers with quantised versions
+        quantize_linear_layers(self.base_model, [4, 8, 11, 16])
         self.apply_gradient_hooks()
 
     def apply_gradient_hooks(self):
         for param in self.base_model.parameters():
             def hook(grad, param=param):
-                _, out_of_range = self.sf_quantizer.tensor_quantize(param)
-                grad = grad * out_of_range.to(grad.dtype)  # Mask to allow gradients only on out-of-range params
-                return grad
+                _, mask = self.sf_quantizer.encode(param)
+                return grad * mask.to(grad.dtype)
             param.register_hook(hook)
 
-    def forward(self, x):
-        x, _ = self.sf_quantizer.tensor_quantize(x)
-        for layer in self.base_model.children():
-            if isinstance(layer, torch.nn.Linear):
-                layer.weight.data, _ = self.sf_quantizer.tensor_quantize(layer.weight.data)
-            x = layer(x)
-            x, _ = self.sf_quantizer.tensor_quantize(x)
-        return x
+    def forward(self, *args, **kwargs):
+        if "input_ids" in kwargs:
+            kwargs["input_ids"] = SFQuantFunction.apply(kwargs["input_ids"], self.sf_quantizer)
+        outputs = self.base_model(*args, **kwargs)
+        if hasattr(outputs, "logits"):
+            outputs.logits = SFQuantFunction.apply(outputs.logits, self.sf_quantizer)
+        return outputs
 
 # Initialize model and tokenizer
 if torch.backends.mps.is_available():
@@ -160,7 +239,8 @@ def check_parameters_in_range(model, sf):
         print("All parameters are within the valid range.")
 
 # Usage
-quantized, last_epoch = load_checkpoint(model, sf.bits, suffix="opt", device=device)
+base_model, last_epoch = load_checkpoint(model, sf.bits, suffix="opt", device=device)
+quantized = QuantizedLlamaModel(base_model, sf)
 print(f"Resuming training from epoch {last_epoch + 1}.")
 
 # Check if model parameters are within range before training
