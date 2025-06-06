@@ -6,7 +6,7 @@ This repository contains the code, methods, and scripts for implementing **Super
 
 ## **What is Superfloat?**  
 
-**Superfloat** is a custom quantization algorithm that operates with a **scalable precision format**. Unlike traditional floating-point systems (e.g., IEEE-754), Superfloat removes the mantissa entirely and focuses solely on the **exponent** for precision representation.  
+**Superfloat** is a custom quantization algorithm that operates with a **scalable precision format**. Unlike traditional floating-point systems (IEEE-754), Superfloat removes the mantissa entirely and focuses solely on the **exponent** for precision representation.  
 
 ### **Key Features**:  
 1. **Sign-Exponent Representation**:  
