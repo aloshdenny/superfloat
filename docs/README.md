@@ -108,7 +108,7 @@ WASQ integrates **LTH** to identify specific weights that are critical for maint
 11. **[sa_mplth.py](sa_mplth.py)**  
     New: Implements Simulated Annealing Multi-Prize Lottery Ticket Hypothesis for healing quantized models.
 
-12. **[results](results/)**  
+12. **[assets/results](assets/results/)**  
     Contains outputs of model tests, perplexity scores, and supplementary studies.
 
 ---
@@ -187,9 +187,9 @@ pip install -r requirements.txt
 
 ---
 
-## **Results**
+## **assets/Results**
 
-The results folder contains:  
+The assets/results folder contains:  
 - **Perplexity scores** for different model configurations.  
 - **Activation magnitude comparisons** before and after quantization.  
 - Supplementary studies showcasing model performance.
@@ -204,27 +204,27 @@ Atreides is an ASIC accelerator designed specifically for Superfloat-based infer
 
 Below is an image showing the FMA in Atreides:
 
-![FMA](results/FMA.png)
+![FMA](assets/results/FMA.png)
 
 ## Expanded View of Chip-1's Architecture
 
 An expanded view of Chip-1's architecture includes non-unified memory blocks (subject to unification), cache, control store (modded RV32 ISA), and an array of FMAs:
 
-![Chip-1 Architecture](results/hardware%20architecture.png)
+![Chip-1 Architecture](assets/results/hardware%20architecture.png)
 
 ### FPGA Functional Units Design
 
 #### 1. 8 x 16-bit Shift Register (simplified)
 
-![FPGA Floorplan](results/shift_register.png)
+![FPGA Floorplan](assets/results/shift_register.png)
 
 #### 2. Activation Unit (simplified)
 
-![FPGA Floorplan](results/activation_unit.png)
+![FPGA Floorplan](assets/results/activation_unit.png)
 
 #### 3. Cycle Count Logic
 
-![FPGA Floorplan](results/cycle_count_logic.png)
+![FPGA Floorplan](assets/results/cycle_count_logic.png)
 
 ## Instruction Set
 
@@ -244,7 +244,7 @@ The current instruction set for the FPGA architecture is show below:
 
 The FPGA floorplan integrated with instruction set is shown below:
 
-![FPGA Floorplan](results/isa_integrated_floorplan.png)
+![FPGA Floorplan](assets/results/isa_integrated_floorplan.png)
 
 ---
 
