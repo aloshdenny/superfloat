@@ -48,9 +48,11 @@ def sf_mul(bin1: str, bin2: str, n_bits: int = None) -> str:
     return f"{sign_bit}.{fractional_part}"
 
 
+
+
 # Example usage:
-# print(fixed_point_signed_multiply('0.101', '0.110'))  # Should return '0.011'
-# print(fixed_point_signed_multiply('1.101', '0.110'))  # Should return '1.011'
-# print(fixed_point_signed_multiply('1.101', '1.110'))  # Should return '0.011'
+# print(sf_mul('0.101', '0.110'))  # Should return '0.011'
+# print(sf_mul('1.101', '0.110'))  # Should return '1.011'
+# print(sf_mul('1.101', '1.110'))  # Should return '0.011'
 
 print(sf_mul('0.1110001','0.0001001'))
