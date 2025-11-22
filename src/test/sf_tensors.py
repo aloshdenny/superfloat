@@ -1,69 +1,58 @@
-def sf_mul(bin1: str, bin2: str, n_bits: int = None) -> str:
-    """
-    Multiplies two signed fixed-point binary fractional numbers in s.xxx format.
-    
-    Args:
-    - bin1, bin2: binary strings like '0.101' or '1.011'
-    - n_bits: number of fractional bits (excluding sign). If None, inferred.
-    
-    Returns:
-    - Result in s.xxx format with sign bit and n_bits fractional bits.
-    """
-    # Extract sign and fractional parts
-    sign1, frac1 = bin1[0], bin1[2:]
-    sign2, frac2 = bin2[0], bin2[2:]
-    # Infer n_bits if not given
-    if n_bits is None:
-        n_bits = max(len(frac1), len(frac2))
-    # Pad fractions to match n_bits
-    frac1 = frac1.ljust(n_bits, '0')
-    frac2 = frac2.ljust(n_bits, '0')
-    # Convert to integers
-    int1 = int(frac1, 2)
-    int2 = int(frac2, 2)
-    # Apply signs
-    if sign1 == '1':
-        int1 = -int1
-    if sign2 == '1':
-        int2 = -int2
-    # Multiply
-    product = int1 * int2
-    # Result needs 2 * n_bits for full precision
-    product_bits = 2 * n_bits
-    abs_product = abs(product)
-    product_bin = bin(abs_product)[2:].zfill(product_bits)
-    # Take the top n_bits as fractional result
-    fractional_part = product_bin[:n_bits]
-    # Determine sign bit
-    sign_bit = '0' if product >= 0 else '1'
-    return f"{sign_bit}.{fractional_part}"
+import os
+import re
+import numpy as np
+
+# =============================
+# Utilities for formatting/IO
+# =============================
+
+def format_matrix(matrix):
+    rows = []
+    for row in matrix:
+        row_str = ', '.join(f'{x:6.2f}' for x in row)
+        rows.append(f'    [{row_str}]')
+    return '[\n' + ',\n'.join(rows) + '\n]'
 
 
-def decimal_to_sf(decimal_val: float, n_bits: int = 8) -> str:
+def save_tensor_to_txt(tensor, filename):
+    """Saves a 2D tensor (list of lists) to a .txt file in formatted rows.
+    Wraps the entire tensor in square brackets and ensures a trailing comma at end of every line.
+    """
+    with open(filename, "w") as f:
+        if not tensor:
+            f.write("[]\n")
+            print(f"✅ Saved: {filename}")
+            return
+
+        f.write("[\n")
+        for row in tensor:
+            row_str = "  [" + ", ".join(str(val) for val in row) + "],\n"
+            f.write(row_str)
+        f.write("]\n")
+    print(f"✅ Saved: {filename}")
+
+
+# =============================
+# Q1.15 (1 sign + 15 fractional) helpers
+# Sign-magnitude convention used in the original code.
+# =============================
+
+def decimal_to_sf(decimal_val: float, n_bits: int = 15) -> str:
     """
     Converts a decimal number to signed fixed-point binary format with overflow clamping.
-    
-    Args:
-    - decimal_val: decimal number (will be clamped to [-1, 1) range)
-    - n_bits: number of fractional bits
-    
-    Returns:
-    - Binary string in s.xxx format
+    Range is [-1.0 + 2^-n, 1.0 - 2^-n]. Uses sign-magnitude textual format: 's.ffff...'.
     """
-    # Clamp to valid SF range
-    max_val = 1.0 - (2 ** (-n_bits))  # Maximum positive value (just under 1.0)
-    min_val = -1.0  # Minimum negative value
-    
+    max_val = 1.0 - (2 ** (-n_bits))
+    min_val = -1.0 + (2 ** (-n_bits))
+
     if decimal_val >= 1.0:
         decimal_val = max_val
     elif decimal_val < -1.0:
         decimal_val = min_val
-    
-    # Determine sign
+
     sign_bit = '0' if decimal_val >= 0 else '1'
     abs_val = abs(decimal_val)
-    
-    # Convert fractional part to binary
+
     frac_binary = ""
     for _ in range(n_bits):
         abs_val *= 2
@@ -72,264 +61,261 @@ def decimal_to_sf(decimal_val: float, n_bits: int = 8) -> str:
             abs_val -= 1
         else:
             frac_binary += '0'
-    
+
     return f"{sign_bit}.{frac_binary}"
 
 
 def sf_to_decimal(sf_binary: str) -> float:
-    """
-    Converts signed fixed-point binary format to decimal.
-    
-    Args:
-    - sf_binary: binary string in s.xxx format
-    
-    Returns:
-    - Decimal equivalent
-    """
+    """Converts signed fixed-point text 's.ffff' (sign-magnitude) to decimal in [-1, 1)."""
     sign_bit = sf_binary[0]
     frac_part = sf_binary[2:]
-    
-    # Convert fractional part to decimal
-    decimal_val = 0
+
+    decimal_val = 0.0
     for i, bit in enumerate(frac_part):
         if bit == '1':
             decimal_val += 2 ** (-(i + 1))
-    
-    # Apply sign
     if sign_bit == '1':
         decimal_val = -decimal_val
-    
     return decimal_val
 
 
-def sf_mul_dec(dec1: float, dec2: float, n_bits: int = 8) -> dict:
+def sf_binary_to_hex(sf_binary: str, n_bits: int = None) -> str:
     """
-    Multiplies two decimal numbers using SF arithmetic with overflow clamping.
-    
-    Args:
-    - dec1, dec2: decimal numbers (will be clamped to SF range if needed)
-    - n_bits: number of fractional bits for binary representation
-    
-    Returns:
-    - Dictionary with 'sf_binary', 'decimal', 'inputs_sf', 'exact_decimal', and overflow info
+    Converts signed fixed-point binary string 's.ffff' (sign-magnitude) to packed hex of (1+n_bits) bits.
     """
-    # Store original values for exact calculation
-    original_dec1, original_dec2 = dec1, dec2
-    
-    # Clamp inputs to valid SF range
-    max_val = 1.0 - (2 ** (-n_bits))
-    min_val = -1.0
-    
-    input1_overflow = False
-    input2_overflow = False
-    
-    if dec1 >= 1.0:
-        dec1 = max_val
-        input1_overflow = True
-    elif dec1 < -1.0:
-        dec1 = min_val
-        input1_overflow = True
-        
-    if dec2 >= 1.0:
-        dec2 = max_val
-        input2_overflow = True
-    elif dec2 < -1.0:
-        dec2 = min_val
-        input2_overflow = True
-    
-    # Convert decimals to SF binary format
-    sf1 = decimal_to_sf(dec1, n_bits)
-    sf2 = decimal_to_sf(dec2, n_bits)
-    
-    # Perform SF multiplication
-    sf_result = sf_mul(sf1, sf2, n_bits)
-    
-    # Convert result back to decimal
-    result_decimal = sf_to_decimal(sf_result)
-    
-    # Calculate exact decimal multiplication for comparison
-    exact_decimal = original_dec1 * original_dec2
-    
-    return {
-        'sf_binary': sf_result,
-        'decimal': result_decimal,
-        'inputs_sf': (sf1, sf2),
-        'exact_decimal': exact_decimal,
-        'error': abs(exact_decimal - result_decimal),
-        'input1_overflow': input1_overflow,
-        'input2_overflow': input2_overflow,
-        'clamped_inputs': (dec1, dec2)
-    }
+    if n_bits is None:
+        n_bits = len(sf_binary) - 2
+    sign_bit = sf_binary[0]
+    frac_part = sf_binary[2:].ljust(n_bits, '0')[:n_bits]
+    full_binary = sign_bit + frac_part
+    binary_int = int(full_binary, 2)
+    total_bits = n_bits + 1
+    hex_digits = (total_bits + 3) // 4
+    return f"0x{binary_int:0{hex_digits}X}"
 
 
-def sf_add_dec(dec1: float, dec2: float, n_bits: int = 8) -> dict:
-    """
-    Adds two decimal numbers using SF arithmetic with overflow clamping.
-    
-    Args:
-    - dec1, dec2: decimal numbers (will be clamped to SF range if needed)
-    - n_bits: number of fractional bits for binary representation
-    
-    Returns:
-    - Dictionary with result information
-    """
-    # Store originals and clamp inputs
-    original_dec1, original_dec2 = dec1, dec2
-    max_val = 1.0 - (2 ** (-n_bits))
-    min_val = -1.0
-    
-    input1_overflow = False
-    input2_overflow = False
-    
-    if dec1 >= 1.0:
-        dec1 = max_val
-        input1_overflow = True
-    elif dec1 < -1.0:
-        dec1 = min_val
-        input1_overflow = True
-        
-    if dec2 >= 1.0:
-        dec2 = max_val
-        input2_overflow = True
-    elif dec2 < -1.0:
-        dec2 = min_val
-        input2_overflow = True
-    
-    # Convert to SF format
-    sf1 = decimal_to_sf(dec1, n_bits)
-    sf2 = decimal_to_sf(dec2, n_bits)
-    
-    # Extract components
-    sign1, frac1 = sf1[0], sf1[2:]
-    sign2, frac2 = sf2[0], sf2[2:]
-    
-    # Convert to signed integers
-    int1 = int(frac1, 2)
-    int2 = int(frac2, 2)
-    
-    if sign1 == '1':
-        int1 = -int1
-    if sign2 == '1':
-        int2 = -int2
-    
-    # Add
-    result = int1 + int2
-    
-    # Handle overflow/underflow in SF integer space
-    max_sf_int = (1 << n_bits) - 1  # Maximum positive SF integer
-    min_sf_int = -(1 << n_bits)     # Minimum negative SF integer
-    
-    result_overflow = False
-    if result > max_sf_int:
-        result = max_sf_int
-        result_overflow = True
-    elif result < min_sf_int:
-        result = min_sf_int
-        result_overflow = True
-    
-    # Convert back to SF format
-    abs_result = abs(result)
-    sign_bit = '0' if result >= 0 else '1'
-    frac_binary = bin(abs_result)[2:].zfill(n_bits)
-    
-    sf_result = f"{sign_bit}.{frac_binary}"
-    result_decimal = sf_to_decimal(sf_result)
-    exact_decimal = original_dec1 + original_dec2
-    
-    return {
-        'sf_binary': sf_result,
-        'decimal': result_decimal,
-        'exact_decimal': exact_decimal,
-        'error': abs(exact_decimal - result_decimal),
-        'result_overflow': result_overflow,
-        'input1_overflow': input1_overflow,
-        'input2_overflow': input2_overflow
-    }
+def tensor_to_hex(tensor: list, n_bits: int = 15) -> list:
+    hex_tensor = []
+    for row in tensor:
+        hex_row = []
+        for val in row:
+            if isinstance(val, str):
+                hex_row.append(sf_binary_to_hex(val, n_bits))
+            else:
+                sf_val = decimal_to_sf(val, n_bits)
+                hex_row.append(sf_binary_to_hex(sf_val, n_bits))
+        hex_tensor.append(hex_row)
+    return hex_tensor
 
 
-def sf_tensor_mul(tensor_a: list, tensor_b: list, n_bits: int = 8) -> dict:
+def save_hex_tensor(tensor, filename, n_bits=15):
+    if not tensor:
+        save_tensor_to_txt([], filename)
+        return
+    if isinstance(tensor[0][0], str) and tensor[0][0].startswith(('0.', '1.')):
+        hex_tensor = tensor_to_hex(tensor, n_bits)
+    else:
+        sf_tensor = [[decimal_to_sf(tensor[i][j], n_bits) for j in range(len(tensor[i]))] for i in range(len(tensor))]
+        hex_tensor = tensor_to_hex(sf_tensor, n_bits)
+    save_tensor_to_txt(hex_tensor, filename)
+
+
+# =============================
+# Pretty printers
+# =============================
+
+def print_tensor(tensor, title, precision=6):
+    print(f"{title}:")
+    for row in tensor:
+        formatted_row = []
+        for val in row:
+            if isinstance(val, str):
+                formatted_row.append(f"{val:>12}")
+            else:
+                formatted_row.append(f"{val:{precision+6}.{precision}f}")
+        print("  [" + ", ".join(formatted_row) + "]")
+    print()
+
+
+def print_tensor_hex(tensor, title, n_bits: int = 15):
+    print(f"{title} (Hexadecimal):")
+    if tensor and isinstance(tensor[0][0], str) and tensor[0][0].startswith(('0.', '1.')):
+        hex_tensor = tensor_to_hex(tensor, n_bits)
+    elif tensor and isinstance(tensor[0][0], (int, float)):
+        sf_tensor = [[decimal_to_sf(tensor[i][j], n_bits) for j in range(len(tensor[i]))] for i in range(len(tensor))]
+        hex_tensor = tensor_to_hex(sf_tensor, n_bits)
+    else:
+        hex_tensor = tensor
+    for row in hex_tensor:
+        formatted_row = [f"{val:>8}" for val in row]
+        print("  [" + ", ".join(formatted_row) + "]")
+    print()
+
+
+def view_tensors_comparison(tensor_a, tensor_b, sf_result, n_bits: int = 15):
+    print("\n" + "="*80)
+    print("TENSOR COMPARISON: BINARY, DECIMAL, AND HEXADECIMAL VIEWS")
+    print("="*80)
+
+    a_sf = [[decimal_to_sf(tensor_a[i][j], n_bits) for j in range(len(tensor_a[i]))] for i in range(len(tensor_a))]
+    b_sf = [[decimal_to_sf(tensor_b[i][j], n_bits) for j in range(len(tensor_b[i]))] for i in range(len(tensor_b))]
+
+    print(f"\nTENSOR A:")
+    print("-" * 40)
+    print_tensor(tensor_a, "Decimal", 3)
+    print_tensor(a_sf, "SF Binary")
+    print_tensor_hex(a_sf, "Hexadecimal", n_bits)
+
+    print(f"\nTENSOR B:")
+    print("-" * 40)
+    print_tensor(tensor_b, "Decimal", 3)
+    print_tensor(b_sf, "SF Binary")
+    print_tensor_hex(b_sf, "Hexadecimal", n_bits)
+
+    print(f"\nSF MULTIPLICATION RESULT:")
+    print("-" * 40)
+    decimal_result = [[sf_to_decimal(sf_result[i][j]) for j in range(len(sf_result[i]))] for i in range(len(sf_result))]
+    print_tensor(decimal_result, "Decimal", 6)
+    print_tensor(sf_result, "SF Binary")
+    print_tensor_hex(sf_result, "Hexadecimal", n_bits)
+
+    print(f"Format Details:")
+    print(f"  Bits: 1 sign + {n_bits} fractional = {n_bits + 1} total bits")
+    print(f"  Hex digits: {(n_bits + 1 + 3) // 4}")
+    print(f"  Range: [{-1.0 + (2**(-n_bits)):.10f}, {1.0 - (2**(-n_bits)):.10f}]")
+    print(f"  Resolution: {2**(-n_bits):.10f}")
+    print("="*80)
+
+
+# ==============================================
+# NEW: Integer-path helpers for guarded accumulation
+# ==============================================
+
+def clamp_q_int(x: int, n_bits: int) -> int:
+    """Clamp an integer Q0.n_bits (sign-magnitude range) to representable range.
+    Max:  +(2^n_bits - 1);  Min: -(2^n_bits - 1)
+    (We avoid -2^n_bits to stay consistent with sign-magnitude textual format.)
     """
-    Multiplies two 2D tensors using signed fixed-point arithmetic with overflow clamping.
-    
-    Args:
-    - tensor_a, tensor_b: 2D lists representing matrices (values will be clamped to SF range)
-    - n_bits: number of fractional bits for SF representation
-    
-    Returns:
-    - Dictionary with SF result, decimal result, exact result, and error analysis
+    qmax = (1 << n_bits) - 1
+    qmin = -qmax
+    return max(qmin, min(qmax, x))
+
+
+def decimal_to_qint(x: float, n_bits: int) -> int:
+    """Quantize decimal x in [-1,1) to signed integer with n_bits fractional bits.
+    Uses rounding-to-nearest (ties to +inf for simplicity). Clamped to sign-magnitude range.
     """
-    # Validate dimensions
-    rows_a = len(tensor_a)
-    cols_a = len(tensor_a[0]) if rows_a > 0 else 0
-    rows_b = len(tensor_b)
-    cols_b = len(tensor_b[0]) if rows_b > 0 else 0
-    
+    scale = 1 << n_bits
+    # Clamp to [-1 + ulp, 1 - ulp]
+    x = max(-1.0 + 1.0/scale, min(1.0 - 1.0/scale, x))
+    q = int(np.round(x * scale))
+    # Ensure sign-magnitude-compliant bounds
+    return clamp_q_int(q, n_bits)
+
+
+def qint_to_sf_string(q: int, n_bits: int) -> str:
+    sign_bit = '0' if q >= 0 else '1'
+    mag = abs(q)
+    frac_binary = format(mag, f'0{n_bits}b')
+    return f"{sign_bit}.{frac_binary}"
+
+
+def qint_to_decimal(q: int, n_bits: int) -> float:
+    return q / float(1 << n_bits)
+
+
+# =============================================================
+# UPDATED: Matrix multiply with 32-bit guarded accumulation
+# =============================================================
+
+def sf_tensor_mul(A: list, B: list, n_bits: int = 15, acc_bits: int = 31) -> dict:
+    """
+    Multiply two matrices using Q1.n_bits arithmetic with **guarded accumulation**.
+
+    Algorithm (integer path):
+      1) Quantize inputs to Q integers (signed, n_bits fractional).
+      2) For each output C[i,j], compute sum_k (A_q[i,k] * B_q[k,j]) in a wide accumulator (acc_bits).
+      3) After the full dot-product, ROUND-to-nearest by adding +/- 2^(n_bits-1), then shift right by n_bits.
+      4) Clamp to representable Q range (sign-magnitude compliant), convert to SF text, and decimal.
+
+    Notes:
+      - Products are kept at full precision until the *end* of the dot-product.
+      - Accumulator width defaults to 31 bits (1 sign + 30 mantissa) to preserve full precision
+        from Q1.15 × Q1.15 multiplication (15 + 15 = 30 fractional bits).
+    """
+    rows_a = len(A)
+    cols_a = len(A[0]) if rows_a > 0 else 0
+    rows_b = len(B)
+    cols_b = len(B[0]) if rows_b > 0 else 0
     if cols_a != rows_b:
         raise ValueError(f"Cannot multiply matrices: {rows_a}x{cols_a} × {rows_b}x{cols_b}")
-    
-    # Initialize result matrices
+
+    # Quantize inputs to Q integers
+    A_q = [[decimal_to_qint(A[i][k], n_bits) for k in range(cols_a)] for i in range(rows_a)]
+    B_q = [[decimal_to_qint(B[k][j], n_bits) for j in range(cols_b)] for k in range(rows_b)]
+
+    # Prepare outputs
     sf_result = [[None for _ in range(cols_b)] for _ in range(rows_a)]
     decimal_result = [[0.0 for _ in range(cols_b)] for _ in range(rows_a)]
     exact_result = [[0.0 for _ in range(cols_b)] for _ in range(rows_a)]
     clamped_exact_result = [[0.0 for _ in range(cols_b)] for _ in range(rows_a)]
-    
+
     total_error = 0.0
     max_error = 0.0
-    input_overflow_count = 0
+    input_overflow_count = 0  # not strictly needed now; inputs are quantized
     result_overflow_count = 0
-    
-    max_sf_val = 1.0 - (2 ** (-n_bits))
-    min_sf_val = -1.0
-    
-    # Perform matrix multiplication using SF arithmetic
+
+    # Accumulator bounds for simulation (signed acc_bits)
+    acc_max = (1 << (acc_bits - 1)) - 1
+    acc_min = -(1 << (acc_bits - 1))
+
+    scale = 1 << n_bits
+    qmax = (1 << n_bits) - 1
+    qmin = -qmax
+
     for i in range(rows_a):
         for j in range(cols_b):
-            # Compute dot product of row i of A and column j of B
-            sf_sum = 0.0  # Accumulate in decimal for intermediate sums
+            acc = 0  # wide accumulator
             exact_sum = 0.0
-            
+
             for k in range(cols_a):
-                # Track input overflows
-                if tensor_a[i][k] >= 1.0 or tensor_a[i][k] < -1.0:
-                    input_overflow_count += 1
-                if tensor_b[k][j] >= 1.0 or tensor_b[k][j] < -1.0:
-                    input_overflow_count += 1
-                
-                # SF multiplication (this handles input clamping internally)
-                mul_result = sf_mul_dec(tensor_a[i][k], tensor_b[k][j], n_bits)
-                
-                # Add to running sum (in decimal space)
-                sf_sum += mul_result['decimal']
-                exact_sum += tensor_a[i][k] * tensor_b[k][j]
-            
-            # Clamp sf_sum to valid SF range
-            original_sf_sum = sf_sum
-            if sf_sum >= 1.0:
-                sf_sum = max_sf_val
-                result_overflow_count += 1
-            elif sf_sum < -1.0:
-                sf_sum = min_sf_val
-                result_overflow_count += 1
-            
-            # Convert final sum to SF format
-            sf_binary = decimal_to_sf(sf_sum, n_bits)
-            sf_result[i][j] = sf_binary
-            decimal_result[i][j] = sf_to_decimal(sf_binary)
+                prod = int(A_q[i][k]) * int(B_q[k][j])  # up to 2*n_bits fractional bits
+                acc += prod
+                # Simulate saturating accumulator to acc_bits if desired
+                if acc > acc_max:
+                    acc = acc_max
+                elif acc < acc_min:
+                    acc = acc_min
+
+                exact_sum += A[i][k] * B[k][j]
+
+            # TRUNCATE to return to Q1.n_bits (matching Verilog hardware behavior)
+            # Verilog: output_result = {sign_out, mult_result[29:15]};
+            # This is simple right-shift without rounding
+            q_out = acc >> n_bits  # back to Q1.n_bits integer via truncation
+
+            # Clamp to representable sign-magnitude range
+            if q_out > qmax:
+                q_out = qmax; result_overflow_count += 1
+            elif q_out < qmin:
+                q_out = qmin; result_overflow_count += 1
+
+            # Store outputs
+            sf_str = qint_to_sf_string(q_out, n_bits)
+            sf_result[i][j] = sf_str
+            dec_val = qint_to_decimal(q_out, n_bits)
+            decimal_result[i][j] = dec_val
             exact_result[i][j] = exact_sum
-            
-            # Clamp exact result for error comparison
-            if exact_sum >= 1.0:
-                clamped_exact_result[i][j] = max_sf_val
-            elif exact_sum < -1.0:
-                clamped_exact_result[i][j] = min_sf_val
-            else:
-                clamped_exact_result[i][j] = exact_sum
-            
-            # Track errors against clamped exact result
-            error = abs(clamped_exact_result[i][j] - decimal_result[i][j])
-            total_error += error
-            max_error = max(max_error, error)
-    
+
+            # For fair error, compare to exact but clamped to representable range
+            exact_clamped = max(-1.0 + 1.0/scale, min(1.0 - 1.0/scale, exact_sum))
+            clamped_exact_result[i][j] = exact_clamped
+
+            err = abs(exact_clamped - dec_val)
+            total_error += err
+            if err > max_error:
+                max_error = err
+
     return {
         'sf_result': sf_result,
         'decimal_result': decimal_result,
@@ -344,61 +330,74 @@ def sf_tensor_mul(tensor_a: list, tensor_b: list, n_bits: int = 8) -> dict:
     }
 
 
-def print_tensor(tensor, title, precision=6):
-    """Helper function to print tensors nicely"""
-    print(f"{title}:")
-    for row in tensor:
-        formatted_row = []
-        for val in row:
-            if isinstance(val, str):  # SF binary format
-                formatted_row.append(f"{val:>12}")
-            else:  # Decimal format
-                formatted_row.append(f"{val:>{precision+6}.{precision}f}")
-        print("  [" + ", ".join(formatted_row) + "]")
-    print()
+# =============================
+# Example driver (same UX as before)
+# =============================
+
+def load_matrix(filename):
+    mat = []
+    with open(filename, 'r') as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                continue
+            if line.startswith('[') and line.endswith(']'):
+                line = line[1:-1].strip()
+            if line.endswith(','):
+                line = line[:-1].strip()
+            if ',' in line:
+                parts = [p.strip() for p in line.split(',') if p.strip() != '']
+            else:
+                parts = line.split()
+            if not parts:
+                parts = re.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', line)
+            try:
+                row = [float(p) for p in parts]
+            except ValueError:
+                parts = re.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', line)
+                row = [float(p) for p in parts]
+            if row:
+                mat.append(row)
+    return mat
 
 
-# Test tensor multiplication
-print("\n" + "="*60)
-print("TENSOR MULTIPLICATION EXAMPLE")
-print("="*60)
+def main():
+    matrix_size = 8
 
-A = [
-    [0.32, -0.75, 0.11],
-    [-0.58, 0.94, -0.23],
-    [0.67, -0.12, -0.81]
-]
+    # If A_matrix.txt / B_matrix.txt don't exist, generate them
+    # if not (os.path.exists(f"superfloat/src/test/A_{matrix_size}x{matrix_size}_matrix.txt") and os.path.exists(f"superfloat/src/test/B_{matrix_size}x{matrix_size}_matrix.txt")):
+    #     A = np.round(np.random.uniform(-1, 1, (matrix_size, matrix_size)), 2)
+    #     B = np.round(np.random.uniform(-1, 1, (matrix_size, matrix_size)), 2)
+    #     with open(f"superfloat/src/test/A_{matrix_size}x{matrix_size}_matrix.txt", "w") as f:
+    #         f.write(format_matrix(A))
+    #     with open(f"superfloat/src/test/B_{matrix_size}x{matrix_size}_matrix.txt", "w") as f:
+    #         f.write(format_matrix(B))
 
-B = [
-    [-0.44, 0.09, 0.65],
-    [0.77, -0.36, -0.52],
-    [-0.19, 0.84, 0.27]
-]
+    A = load_matrix(f"superfloat/src/test/A_{matrix_size}x{matrix_size}_matrix.txt")
+    B = load_matrix(f"superfloat/src/test/B_{matrix_size}x{matrix_size}_matrix.txt")
 
-print("Input Tensors:")
-print_tensor(A, "Tensor A (Decimal)", 2)
+    if not A or not B:
+        raise ValueError("One of the input files is empty or could not be parsed: A_matrix.txt, B_matrix.txt")
+    if len(A[0]) != len(B):
+        raise ValueError(f"Matrix dimension mismatch for multiplication: A is {len(A)}x{len(A[0])}, B is {len(B)}x{len(B[0]) if B and B[0] else 0}")
 
-# Convert input tensors to SF format for display
-A_sf = [[decimal_to_sf(A[i][j], 16) for j in range(len(A[i]))] for i in range(len(A))]
-B_sf = [[decimal_to_sf(B[i][j], 16) for j in range(len(B[i]))] for i in range(len(B))]
+    # # Previews in SF binary for inputs
+    A_sf = [[decimal_to_sf(A[i][j], 15) for j in range(len(A[i]))] for i in range(len(A))]
+    B_sf = [[decimal_to_sf(B[i][j], 15) for j in range(len(B[i]))] for i in range(len(B))]
 
-print_tensor(A_sf, "Tensor A (SF Binary)")
-print_tensor(B, "Tensor B (Decimal)", 2)
-print_tensor(B_sf, "Tensor B (SF Binary)")
+    # # Guarded accumulate multiply with 31-bit accumulator (1 sign + 30 mantissa)
+    result = sf_tensor_mul(A, B, n_bits=15, acc_bits=31)
 
-# Perform SF tensor multiplication
-result = sf_tensor_mul(A, B, n_bits=16)
+    # Save binary (SF) tensors
+    save_tensor_to_txt(A_sf, f"superfloat/src/test/A_{matrix_size}x{matrix_size}_binary.txt")
+    save_tensor_to_txt(B_sf, f"superfloat/src/test/B_{matrix_size}x{matrix_size}_binary.txt")
+    save_tensor_to_txt(result['sf_result'], f"superfloat/src/test/Result_{matrix_size}x{matrix_size}_binary.txt")
 
-print("Results:")
-print_tensor(result['sf_result'], "SF Binary Result")
-print_tensor(result['decimal_result'], "SF Decimal Result", 6)
-print_tensor(result['exact_result'], "Exact Decimal Result", 6)
-print_tensor(result['clamped_exact_result'], "Clamped Exact Result", 6)
+    # Save hexadecimal tensors
+    save_hex_tensor(A_sf, f"superfloat/src/test/A_{matrix_size}x{matrix_size}_hex.txt", n_bits=15)
+    save_hex_tensor(B_sf, f"superfloat/src/test/B_{matrix_size}x{matrix_size}_hex.txt", n_bits=15)
+    save_hex_tensor(result['sf_result'], f"superfloat/src/test/Result_{matrix_size}x{matrix_size}_hex.txt", n_bits=15)
 
-print(f"Error Analysis (SF vs Clamped Exact):")
-print(f"  Total Error: {result['total_error']:.8f}")
-print(f"  Average Error: {result['average_error']:.8f}")
-print(f"  Maximum Error: {result['max_error']:.8f}")
-print(f"  Input Overflow Count: {result['input_overflow_count']}")
-print(f"  Result Overflow Count: {result['result_overflow_count']}")
-print(f"  Result Shape: {result['result_shape']}")
+
+if __name__ == "__main__":
+    main()
