@@ -135,11 +135,7 @@ def train_one_epoch(model: nn.Module,
 
         # ── forward ──────────────────────────────────────────────────────
         logits = model(images_q)
-        
-        # Multiply logits by a temperature scale before CrossEntropy
-        # because the pure Q1.15 logits are strictly clamped to [-1, 1].
-        # Otherwise, the maximum softmax probability is ~45%, creating a loss floor of ~0.80.
-        loss   = criterion(logits * 10.0, labels)
+        loss   = criterion(logits, labels)  # scale 24.0 handled in model forward
 
         # ── backward ─────────────────────────────────────────────────────
         optimizer.zero_grad(set_to_none=True)
@@ -190,7 +186,7 @@ def validate(model: nn.Module,
         images, labels = images.to(device), labels.to(device)
         images_q = quantize_images_q115(images)   # Q1.15 inputs
         logits   = model(images_q)
-        loss     = criterion(logits * 10.0, labels)
+        loss     = criterion(logits, labels)
 
         batch_size     = labels.size(0)
         total_samples += batch_size

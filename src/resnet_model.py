@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 
 try:
-    from sf16_quantizer import Q115Conv2d, Q115Linear, ste_quantize_q115
+    from sf16_quantizer import Q115Conv2d, Q115Linear, ste_quantize_q115, ste_quantize_bfp, Q115Snap
     _Q115_AVAILABLE = True
 except ImportError:
     _Q115_AVAILABLE = False
@@ -62,9 +62,11 @@ class BasicBlock(nn.Module):
 
         self.conv1 = _make_conv3x3(in_ch, out_ch, stride, use_q115=use_q115)
         self.bn1   = norm_layer(out_ch)
+        self.snap1 = Q115Snap() if use_q115 else nn.Identity()
         self.relu  = nn.ReLU(inplace=True)
         self.conv2 = _make_conv3x3(out_ch, out_ch, use_q115=use_q115)
         self.bn2   = norm_layer(out_ch)
+        self.snap2 = Q115Snap() if use_q115 else nn.Identity()
         self.downsample = downsample
         self.stride = stride
         self.use_q115 = use_q115
@@ -74,20 +76,26 @@ class BasicBlock(nn.Module):
 
         out = self.conv1(x)
         out = self.bn1(out)
+        if self.use_q115:
+            out = self.snap1(out)
         out = self.relu(out)
 
         out = self.conv2(out)
         out = self.bn2(out)
+        if self.use_q115:
+            out = self.snap2(out)
 
         if self.downsample is not None:
             identity = self.downsample(x)
 
-        out = out + identity
+        if self.use_q115:
+            # 0.75 residual scaling to prevent amplitude collapse in Scale-1 stream
+            out = 0.75 * out + identity
+            out = ste_quantize_q115(out)
+        else:
+            out = out + identity
+
         out = self.relu(out)
-        # Activations are NOT quantized here — in real Q1.15 hardware the
-        # multiply-accumulate uses a wider int32 accumulator, so inter-layer
-        # activations live outside [-1,1).  Clamping here causes amplitude
-        # collapse (~32% saturation per block, nearly binary by layer 4).
         return out
 
 
@@ -125,21 +133,31 @@ class Bottleneck(nn.Module):
 
         out = self.conv1(x)
         out = self.bn1(out)
+        if self.use_q115:
+            out = ste_quantize_q115(out)
         out = self.relu(out)
 
         out = self.conv2(out)
         out = self.bn2(out)
+        if self.use_q115:
+            out = ste_quantize_q115(out)
         out = self.relu(out)
 
         out = self.conv3(out)
         out = self.bn3(out)
+        if self.use_q115:
+            out = ste_quantize_q115(out)
 
         if self.downsample is not None:
             identity = self.downsample(x)
 
-        out = out + identity
+        if self.use_q115:
+            out = 0.75 * out + identity
+            out = ste_quantize_q115(out)
+        else:
+            out = out + identity
+
         out = self.relu(out)
-        # Same as BasicBlock — no per-block activation quantization.
         return out
 
 
@@ -184,6 +202,7 @@ class ResNet(nn.Module):
         self.conv1   = conv_class(3, self.in_ch, kernel_size=3, stride=1,
                                   padding=1, bias=False)
         self.bn1     = norm_layer(self.in_ch)
+        self.snap1   = Q115Snap() if use_q115 else nn.Identity()
         self.relu    = nn.ReLU(inplace=True)
         # (no maxpool – adapted for 32×32 CIFAR images)
 
@@ -198,7 +217,8 @@ class ResNet(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
         fc_class = Q115Linear if use_q115 else nn.Linear
-        self.fc  = fc_class(512 * block.expansion, num_classes)
+        self.fc  = fc_class(512 * block.expansion, num_classes, accum_scale=24.0) if use_q115 else \
+                   fc_class(512 * block.expansion, num_classes)
 
         # Weight init
         for m in self.modules():
@@ -238,6 +258,7 @@ class ResNet(nn.Module):
                     Q115Conv2d(self.in_ch, out_ch * block.expansion,
                                kernel_size=1, stride=stride, bias=False),
                     norm_layer(out_ch * block.expansion),
+                    Q115Snap(),
                 )
             else:
                 downsample = nn.Sequential(
@@ -264,10 +285,11 @@ class ResNet(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Input is pre-quantised to Q1.15 by the data pipeline before
         # being passed here – do not re-quantise inside the model.
-        x = self.conv1(x)   # weights are Q1.15 via Q115Conv2d
+        x = self.conv1(x)
         x = self.bn1(x)
+        if self.use_q115:
+            x = self.snap1(x)
         x = self.relu(x)
-        # Stem activations stay in float32 (int32 accumulator equivalent)
 
         x = self.layer1(x)
         x = self.layer2(x)
@@ -278,10 +300,10 @@ class ResNet(nn.Module):
         x = torch.flatten(x, 1)
         x = self.fc(x)         # weights are Q1.15 via Q115Linear
 
-        # Snap the final logits to Q1.15 so outputs are representable in SF16.
+        # Snap the final logits to the Q1.15 grid with Logit Scale (24.0).
         # We use STE so gradients still flow normally.
         if self.use_q115:
-            x = ste_quantize_q115(x)
+            x = ste_quantize_bfp(x, 24.0)
 
         return x
 

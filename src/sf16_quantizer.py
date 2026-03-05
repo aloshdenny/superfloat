@@ -1,11 +1,21 @@
 """
-sf16_quantizer.py  –  Q1.15 (SF16) quantization primitives for PyTorch
+sf16_quantizer.py  –  Q1.15 (SF16) and Q1.31 quantization primitives for PyTorch
 
-Q1.15 format (what happens in real hardware):
+Q1.15 format:
 ──────────────────────────────────────────────────────────────────────────────
   Stored representation:  signed 16-bit integer (int16)
   Logical meaning:        int16_value / 2^15   ∈ [-1, 1)
   Resolution:             1 / 2^15  ≈  3.05e-5
+
+Q1.31 format (accumulator):
+──────────────────────────────────────────────────────────────────────────────
+  Stored representation:  signed 32-bit integer (int32)
+  Logical meaning:        int32_value / 2^31  ∈ [-1, 1)
+  Resolution:             1 / 2^31  ≈  4.65e-10
+
+  In real hardware, Q1.15 × Q1.15 = Q2.30 per product; summing N products
+  into an int32 accumulator and then right-shifting by 1 gives Q1.31.
+  We simulate this by: clamp(x, -1, 1), then round to the Q1.31 grid.
 
 Block Floating Point (BFP) scaling:
 ──────────────────────────────────────────────────────────────────────────────
@@ -33,12 +43,13 @@ Scale choices (mirroring q115_common.cuh):
 
 Training strategy:
 ──────────────────────────────────────────────────────────────────────────────
-  FORWARD : weights      → Q1.15 (scale 1) via STE before every matmul
-            activations  → Q1.15 (scale 8) via STE at each layer boundary
-            inputs       → Q1.15 (scale 3) once at network entry
+  FORWARD : inputs       → BFP Q1.15 (scale 3) once at network entry
+            weights      → Q1.15 (scale 1) before every matmul
+            accumulator  → Q1.31 (scale 1) after every Conv/Linear output
+            activations  → BFP Q1.15 (scale 8) at each block boundary after BN+ReLU
             logits       → Q1.15 (scale 1) at network exit
   BACKWARD: STE passes gradients through all Q boundaries in FP32
-  OPTIMIZER: AdamW on FP32 master weights; snap to Q1.15 grid after each step
+  OPTIMIZER: AdamW on FP32 master weights; clamp to Q1.15 range after each step
 """
 
 import torch
@@ -52,12 +63,17 @@ Q115_MAX_FLOAT  =  32767.0 / Q115_SCALE # ≈  0.999969  (int16 max / 2^15)
 Q115_MIN_FLOAT  = -32768.0 / Q115_SCALE # = -1.0       (int16 min / 2^15)
 Q115_RESOLUTION =  1.0    / Q115_SCALE  # ≈  3.05e-5
 
+# Q1.31 accumulator constants (simulates int32 accumulator output)
+Q131_SCALE      = 2_147_483_648.0                   # 2^31
+Q131_MAX_FLOAT  =  2_147_483_647.0 / Q131_SCALE     # ≈  1.0 - 2^-31
+Q131_MIN_FLOAT  = -2_147_483_648.0 / Q131_SCALE     # = -1.0
+Q131_RESOLUTION =  1.0             / Q131_SCALE     # ≈  4.65e-10
+
 # Per-tensor Block Floating Point scale factors
 # (mirror q115_common.cuh: Q115_FFN_SCALE, Q115_ATTENTION_SCALE, etc.)
-Q115_ACT_SCALE   = 8.0   # intermediate activations: post-BN sits in ~[-3,3]
-                          # scale=8 → representable range [-8, 8), <0.1% sat
-Q115_INPUT_SCALE = 3.0   # CIFAR-10 images after std normalization: ~[-2.5, 2.5]
-Q115_LOGIT_SCALE = 1.0   # final class logits: kept at scale 1, small values
+Q115_ACT_SCALE   = 1.0   # Standard residual stream is Scale-1 (strictly [-1, 1))
+Q115_INPUT_SCALE = 3.0   # CIFAR-10 images: ~[-2.5, 2.5]
+Q115_LOGIT_SCALE = 24.0  # Final logits: match superfloat.cuda (allows confident softmax)
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +87,17 @@ def quantize_q115(x: torch.Tensor) -> torch.Tensor:
     """
     x = x.clamp(Q115_MIN_FLOAT, Q115_MAX_FLOAT)
     return (x * Q115_SCALE).round() / Q115_SCALE
+
+
+def quantize_q131(x: torch.Tensor) -> torch.Tensor:
+    """
+    Quantize to Q1.31 grid, representable range [-1, 1).
+    Simulates the int32 accumulator output of a Q1.15 × Q1.15 MAC array.
+    Values outside [-1, 1) are saturated — BN must learn to keep outputs in range.
+    Resolution is 2^-31 ≈ 4.65e-10 (vastly finer than Q1.15).
+    """
+    x = x.clamp(Q131_MIN_FLOAT, Q131_MAX_FLOAT)
+    return (x * Q131_SCALE).round() / Q131_SCALE
 
 
 def quantize_bfp(x: torch.Tensor, scale: float) -> torch.Tensor:
@@ -179,6 +206,38 @@ class STEQuantizeBFP(torch.autograd.Function):
 ste_quantize_q115 = STEQuantizeQ115.apply
 
 
+def ste_quantize_q131(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+    """
+    Forward : quantize to Q1.31 grid (clamped to [-scale, scale)).
+    Backward: straight-through (STE).
+    Simulates the int32 accumulator truncation.
+    """
+    class STEQuantizeQ131(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x: torch.Tensor) -> torch.Tensor:
+            # normalize by scale, quantize to Q1.31 unit range, then rescale
+            norm = x / scale
+            snapped = quantize_q131(norm)
+            return snapped * scale
+
+        @staticmethod
+        def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+            return grad_output
+
+    return STEQuantizeQ131.apply(x)
+
+
+class Q115Snap(nn.Module):
+    """Module wrapper for Q1.15 snapping in nn.Sequential."""
+    def __init__(self, scale: float = 1.0):
+        super().__init__()
+        self.scale = scale
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.scale == 1.0:
+            return ste_quantize_q115(x)
+        return ste_quantize_bfp(x, self.scale)
+
+
 def ste_quantize_bfp(x: torch.Tensor, scale: float) -> torch.Tensor:
     """STE-wrapped BFP quantization. Use this anywhere in the forward graph."""
     s = torch.tensor(scale, dtype=torch.float32)
@@ -191,27 +250,30 @@ def ste_quantize_bfp(x: torch.Tensor, scale: float) -> torch.Tensor:
 
 class Q115Conv2d(nn.Conv2d):
     """
-    Conv2d where weights are quantized to Q1.15 (scale=1) before every
-    forward call.  The accumulation (MAC loop) remains in float32, exactly
-    as an int32 accumulator would in real hardware.
-
-    Inputs are assumed to be pre-quantized by the caller at the appropriate
-    BFP scale for their tensor type.
+    Conv2d where:
+      - weights are quantized to Q1.15 before forward
+      - accumulator output is quantized to Q1.31 (snapped to accum_scale)
     """
+    def __init__(self, *args, accum_scale: float = 1.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.accum_scale = accum_scale
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        w_q = ste_quantize_q115(self.weight)   # weights: Q1.15, scale=1
-        return self._conv_forward(x, w_q, self.bias)
+        w_q = ste_quantize_q115(self.weight)
+        out = self._conv_forward(x, w_q, self.bias)
+        return ste_quantize_q131(out, self.accum_scale)
 
-
-# ---------------------------------------------------------------------------
-# Q1.15-aware Linear  (weights in Q1.15, accumulator in float32)
-# ---------------------------------------------------------------------------
 
 class Q115Linear(nn.Linear):
-    """Linear with Q1.15-quantized weights. Same contract as Q115Conv2d."""
+    """Linear where weights are Q1.15 and accumulator is Q1.31."""
+    def __init__(self, *args, accum_scale: float = 1.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.accum_scale = accum_scale
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        w_q = ste_quantize_q115(self.weight)   # weights: Q1.15, scale=1
-        return nn.functional.linear(x, w_q, self.bias)
+        w_q = ste_quantize_q115(self.weight)
+        out = nn.functional.linear(x, w_q, self.bias)
+        return ste_quantize_q131(out, self.accum_scale)
 
 
 # ---------------------------------------------------------------------------
