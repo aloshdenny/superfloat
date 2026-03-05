@@ -1,0 +1,269 @@
+"""
+train_resnet_baseline.py
+========================
+Standard FP32 ResNet-18 trainer on CIFAR-10 (reference / baseline).
+
+This script is the counterpart to train_resnet_sf16.py.
+Running both and then compare_training.py will produce side-by-side
+loss-convergence plots of SF16 vs baseline.
+
+Outputs
+-------
+  logs/baseline_metrics.json   – per-epoch acc / loss
+  checkpoints/baseline_best.pt – best validation checkpoint
+"""
+
+import os
+import sys
+import json
+import time
+import argparse
+import logging
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+import torchvision
+import torchvision.transforms as T
+
+# ── local modules ────────────────────────────────────────────────────────────
+sys.path.insert(0, str(Path(__file__).parent))
+from resnet_model import resnet18
+
+# ── logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="[BASE] %(asctime)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("baseline")
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def get_cifar10_loaders(batch_size: int, num_workers: int = 2,
+                        data_root: str = "./data") -> tuple:
+    """CIFAR-10 data loaders (same normalization as SF16 script)."""
+    MEAN = (0.4914, 0.4822, 0.4465)
+    STD  = (0.2023, 0.1994, 0.2010)
+
+    train_tf = T.Compose([
+        T.RandomCrop(32, padding=4),
+        T.RandomHorizontalFlip(),
+        T.ToTensor(),
+        T.Normalize(MEAN, STD),
+    ])
+    val_tf = T.Compose([
+        T.ToTensor(),
+        T.Normalize(MEAN, STD),
+    ])
+
+    train_set = torchvision.datasets.CIFAR10(data_root, train=True,
+                                              download=True,
+                                              transform=train_tf)
+    val_set   = torchvision.datasets.CIFAR10(data_root, train=False,
+                                              download=True,
+                                              transform=val_tf)
+
+    train_loader = DataLoader(train_set, batch_size=batch_size,
+                              shuffle=True,  num_workers=num_workers,
+                              pin_memory=True, drop_last=True)
+    val_loader   = DataLoader(val_set,   batch_size=batch_size * 2,
+                              shuffle=False, num_workers=num_workers,
+                              pin_memory=True)
+    return train_loader, val_loader
+
+
+def get_lr_scheduler(optimizer: optim.Optimizer, num_epochs: int,
+                     warmup_epochs: int = 5) -> optim.lr_scheduler.LRScheduler:
+    """Cosine annealing with linear warmup (mirrors SF16 script)."""
+    def lr_lambda(epoch: int) -> float:
+        if epoch < warmup_epochs:
+            return (epoch + 1) / max(warmup_epochs, 1)
+        progress = (epoch - warmup_epochs) / max(num_epochs - warmup_epochs, 1)
+        return 0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.14159265)).item())
+    return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+# ── training / validation loops ──────────────────────────────────────────────
+
+def train_one_epoch(model: nn.Module,
+                    loader: DataLoader,
+                    criterion: nn.Module,
+                    optimizer: optim.Optimizer,
+                    device: torch.device,
+                    epoch: int) -> dict:
+    model.train()
+    total_loss    = 0.0
+    total_correct = 0
+    total_samples = 0
+    t_start = time.time()
+
+    for step, (images, labels) in enumerate(loader):
+        images, labels = images.to(device), labels.to(device)
+
+        # ── forward ──────────────────────────────────────────────────────
+        logits = model(images)
+        loss   = criterion(logits, labels)
+
+        # ── backward ─────────────────────────────────────────────────────
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        # ── bookkeeping ───────────────────────────────────────────────────
+        batch_size    = labels.size(0)
+        total_samples += batch_size
+        total_loss    += loss.item() * batch_size
+        preds          = logits.argmax(dim=1)
+        total_correct += (preds == labels).sum().item()
+
+        if (step + 1) % 50 == 0:
+            acc = total_correct / total_samples * 100
+            log.info(f"Epoch {epoch}  step {step+1}/{len(loader)} | "
+                     f"loss {total_loss/total_samples:.4f} | acc {acc:.2f}%")
+
+    elapsed = time.time() - t_start
+    return {
+        "train_loss": total_loss   / total_samples,
+        "train_acc":  total_correct / total_samples * 100,
+        "epoch_time": elapsed,
+    }
+
+
+@torch.no_grad()
+def validate(model: nn.Module,
+             loader: DataLoader,
+             criterion: nn.Module,
+             device: torch.device) -> dict:
+    model.eval()
+    total_loss    = 0.0
+    total_correct = 0
+    total_samples = 0
+
+    for images, labels in loader:
+        images, labels = images.to(device), labels.to(device)
+        logits = model(images)
+        loss   = criterion(logits, labels)
+
+        batch_size     = labels.size(0)
+        total_samples += batch_size
+        total_loss    += loss.item() * batch_size
+        preds          = logits.argmax(dim=1)
+        total_correct += (preds == labels).sum().item()
+
+    return {
+        "val_loss": total_loss   / total_samples,
+        "val_acc":  total_correct / total_samples * 100,
+    }
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Baseline FP32 ResNet-18 trainer")
+    parser.add_argument("--epochs",       type=int,   default=100)
+    parser.add_argument("--batch_size",   type=int,   default=128)
+    parser.add_argument("--lr",           type=float, default=0.01)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--warmup",       type=int,   default=5)
+    parser.add_argument("--num_classes",  type=int,   default=10)
+    parser.add_argument("--data_root",    type=str,   default="./data")
+    parser.add_argument("--log_dir",      type=str,   default="./logs")
+    parser.add_argument("--ckpt_dir",     type=str,   default="./checkpoints")
+    parser.add_argument("--workers",      type=int,   default=2)
+    parser.add_argument("--seed",         type=int,   default=42)
+    args = parser.parse_args()
+
+    # ── reproducibility ───────────────────────────────────────────────────
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
+    # ── device ────────────────────────────────────────────────────────────
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+    log.info(f"Using device: {device}")
+
+    # ── directories ───────────────────────────────────────────────────────
+    os.makedirs(args.log_dir,  exist_ok=True)
+    os.makedirs(args.ckpt_dir, exist_ok=True)
+    log_path  = os.path.join(args.log_dir,  "baseline_metrics.json")
+    ckpt_path = os.path.join(args.ckpt_dir, "baseline_best.pt")
+
+    # ── data ──────────────────────────────────────────────────────────────
+    train_loader, val_loader = get_cifar10_loaders(
+        args.batch_size, args.workers, args.data_root)
+    log.info(f"Train batches: {len(train_loader)}  |  Val batches: {len(val_loader)}")
+
+    # ── model ─────────────────────────────────────────────────────────────
+    model = resnet18(num_classes=args.num_classes).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    log.info(f"Baseline FP32 ResNet-18 | {n_params:,} parameters")
+
+    # ── optimizer & scheduler ─────────────────────────────────────────────
+    optimizer = optim.AdamW(model.parameters(),
+                            lr=args.lr, weight_decay=args.weight_decay,
+                            betas=(0.9, 0.999))
+    scheduler = get_lr_scheduler(optimizer, args.epochs, args.warmup)
+    criterion = nn.CrossEntropyLoss()
+
+    # ── training loop ─────────────────────────────────────────────────────
+    history     = []
+    best_val_acc = 0.0
+
+    log.info(f"Starting FP32 baseline training for {args.epochs} epochs")
+
+    for epoch in range(1, args.epochs + 1):
+        train_metrics = train_one_epoch(model, train_loader, criterion,
+                                        optimizer, device, epoch)
+        val_metrics   = validate(model, val_loader, criterion, device)
+        scheduler.step()
+
+        current_lr = optimizer.param_groups[0]["lr"]
+
+        record = {
+            "epoch": epoch,
+            "lr":    current_lr,
+            **train_metrics,
+            **val_metrics,
+        }
+        history.append(record)
+
+        log.info(
+            f"[Epoch {epoch:3d}/{args.epochs}] "
+            f"train_loss={train_metrics['train_loss']:.4f}  "
+            f"train_acc={train_metrics['train_acc']:.2f}%  "
+            f"val_loss={val_metrics['val_loss']:.4f}  "
+            f"val_acc={val_metrics['val_acc']:.2f}%  "
+            f"lr={current_lr:.5f}"
+        )
+
+        if val_metrics["val_acc"] > best_val_acc:
+            best_val_acc = val_metrics["val_acc"]
+            torch.save({
+                "epoch":        epoch,
+                "model_state":  model.state_dict(),
+                "optimizer":    optimizer.state_dict(),
+                "best_val_acc": best_val_acc,
+                "args":         vars(args),
+            }, ckpt_path)
+            log.info(f"  ↑ New best val_acc={best_val_acc:.2f}% – saved to {ckpt_path}")
+
+        with open(log_path, "w") as f:
+            json.dump(history, f, indent=2)
+
+    log.info(f"Training complete.  Best val_acc = {best_val_acc:.2f}%")
+    log.info(f"Metrics written to {log_path}")
+    log.info(f"Best checkpoint  : {ckpt_path}")
+
+
+if __name__ == "__main__":
+    main()

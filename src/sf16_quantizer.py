@@ -1,0 +1,249 @@
+"""
+sf16_quantizer.py  –  Q1.15 (SF16) quantization primitives for PyTorch
+
+Q1.15 format (what happens in real hardware):
+──────────────────────────────────────────────────────────────────────────────
+  Stored representation:  signed 16-bit integer (int16)
+  Logical meaning:        int16_value / 2^15   ∈ [-1, 1)
+  Resolution:             1 / 2^15  ≈  3.05e-5
+
+Block Floating Point (BFP) scaling:
+──────────────────────────────────────────────────────────────────────────────
+  Real activations after BatchNorm are ~N(0,1) and can reach ±3.  Storing
+  them naively in Q1.15 (range [-1,1)) saturates 32% of values, collapsing
+  the network.
+
+  The solution (same as q115_common.cuh in superfloat.cuda) is per-tensor
+  *scale factors*.  A scaled Q1.15 tensor with scale s represents the range
+  [-s, s):
+
+      stored int16  =  round(x / s * 32768)
+      recovered x   =  int16 / 32768 * s
+
+  In float simulation:  quantize_bfp(x, s) = quantize_q115(x/s) * s
+
+  The hardware accumulator is always wider (int32 in fixed-point, float32
+  in simulation) — even real Q1.15 chips do not accumulate in Q1.15.
+
+Scale choices (mirroring q115_common.cuh):
+──────────────────────────────────────────────────────────────────────────────
+  Q115_ACT_SCALE   = 8.0   # post-BN+ReLU activations, covers ±3σ safely
+  Q115_INPUT_SCALE = 3.0   # CIFAR images after standard normalization
+  Q115_LOGIT_SCALE = 1.0   # final logits (kept small, cross-entropy is fine)
+
+Training strategy:
+──────────────────────────────────────────────────────────────────────────────
+  FORWARD : weights      → Q1.15 (scale 1) via STE before every matmul
+            activations  → Q1.15 (scale 8) via STE at each layer boundary
+            inputs       → Q1.15 (scale 3) once at network entry
+            logits       → Q1.15 (scale 1) at network exit
+  BACKWARD: STE passes gradients through all Q boundaries in FP32
+  OPTIMIZER: AdamW on FP32 master weights; snap to Q1.15 grid after each step
+"""
+
+import torch
+import torch.nn as nn
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+Q115_SCALE      = 32768.0               # 2^15
+Q115_MAX_FLOAT  =  32767.0 / Q115_SCALE # ≈  0.999969  (int16 max / 2^15)
+Q115_MIN_FLOAT  = -32768.0 / Q115_SCALE # = -1.0       (int16 min / 2^15)
+Q115_RESOLUTION =  1.0    / Q115_SCALE  # ≈  3.05e-5
+
+# Per-tensor Block Floating Point scale factors
+# (mirror q115_common.cuh: Q115_FFN_SCALE, Q115_ATTENTION_SCALE, etc.)
+Q115_ACT_SCALE   = 8.0   # intermediate activations: post-BN sits in ~[-3,3]
+                          # scale=8 → representable range [-8, 8), <0.1% sat
+Q115_INPUT_SCALE = 3.0   # CIFAR-10 images after std normalization: ~[-2.5, 2.5]
+Q115_LOGIT_SCALE = 1.0   # final class logits: kept at scale 1, small values
+
+
+# ---------------------------------------------------------------------------
+# Core BFP-aware quantize/dequantize  (float simulation of Q1.15 hardware)
+# ---------------------------------------------------------------------------
+
+def quantize_q115(x: torch.Tensor) -> torch.Tensor:
+    """
+    Quantize to Q1.15 grid, representable range [-1, 1).
+    Values outside the range are saturated (clipped).
+    """
+    x = x.clamp(Q115_MIN_FLOAT, Q115_MAX_FLOAT)
+    return (x * Q115_SCALE).round() / Q115_SCALE
+
+
+def quantize_bfp(x: torch.Tensor, scale: float) -> torch.Tensor:
+    """
+    Block Floating Point (BFP) Q1.15 quantization with per-tensor scale.
+
+    Represents the range [-scale, scale) using Q1.15 format:
+        stored   = round(x / scale * 32768) / 32768   [Q1.15 value in [-1,1)]
+        logical  = stored * scale                      [float back in [-s, s)]
+
+    This is exactly what q115_to_float_scaled / float_to_q115_scaled do in
+    q115_common.cuh.
+    """
+    normalized = x / scale
+    snapped    = quantize_q115(normalized)   # clamp + round to Q1.15 grid
+    return snapped * scale                   # back to original scale
+
+
+# ---------------------------------------------------------------------------
+# Functional helpers
+# ---------------------------------------------------------------------------
+
+def to_q115_int16(x: torch.Tensor) -> torch.Tensor:
+    """Convert float tensor to int16 Q1.15 representation (scale=1)."""
+    x_clamped = x.clamp(Q115_MIN_FLOAT, Q115_MAX_FLOAT)
+    return (x_clamped * Q115_SCALE).round().to(torch.int16)
+
+
+def from_q115_int16(x: torch.Tensor) -> torch.Tensor:
+    """Convert int16 Q1.15 representation back to float (scale=1)."""
+    return x.to(torch.float32) / Q115_SCALE
+
+
+def quantize_images_q115(images: torch.Tensor,
+                          scale: float = Q115_INPUT_SCALE) -> torch.Tensor:
+    """
+    Quantize input images to Q1.15 using BFP scaling.
+
+    CIFAR-10 images normalized with standard mean/std span roughly [-2.5, 2.5].
+    With scale=3.0, the Q1.15 representable range covers [-3, 3):
+        • ~99.7% of pixels land inside the range (3σ coverage)
+        • No meaningful information is destroyed
+    """
+    return quantize_bfp(images, scale)
+
+
+def quantize_activations_q115(x: torch.Tensor,
+                               scale: float = Q115_ACT_SCALE) -> torch.Tensor:
+    """
+    Quantize intermediate activations to Q1.15 using BFP scaling.
+
+    Post-BN activations are ~N(0,1), after ReLU they are in [0, ~3].
+    Residual connections can sum two such branches → [0, ~6].
+    With scale=8.0, the representable range [-8, 8) covers all of this
+    with <0.1% saturation.
+
+    This is the equivalent of q115_to_float_scaled(x, Q115_FFN_SCALE) in
+    q115_common.cuh.
+
+    The multiply-accumulate inside Conv/Linear still uses float32
+    (the hardware equivalent is an int32 accumulator, widened from Q1.15).
+    """
+    return quantize_bfp(x, scale)
+
+
+def quantize_outputs_q115(logits: torch.Tensor,
+                           scale: float = Q115_LOGIT_SCALE) -> torch.Tensor:
+    """Quantize final output logits to Q1.15 (BFP with given scale)."""
+    return quantize_bfp(logits, scale)
+
+
+# ---------------------------------------------------------------------------
+# Straight-Through Estimator autograd functions
+# ---------------------------------------------------------------------------
+
+class STEQuantizeQ115(torch.autograd.Function):
+    """
+    Forward : quantise to Q1.15 grid (float representation, scale=1).
+    Backward: pass gradients straight through (identity / STE).
+    """
+    @staticmethod
+    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
+        return quantize_q115(x)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+        return grad_output
+
+
+class STEQuantizeBFP(torch.autograd.Function):
+    """
+    Forward : BFP-scaled Q1.15 quantization (scale stored in ctx).
+    Backward: straight-through.
+    """
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        ctx.save_for_backward(scale)
+        s = scale.item()
+        return quantize_bfp(x, s)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return grad_output, None   # STE for x; None for scale (not learned)
+
+
+ste_quantize_q115 = STEQuantizeQ115.apply
+
+
+def ste_quantize_bfp(x: torch.Tensor, scale: float) -> torch.Tensor:
+    """STE-wrapped BFP quantization. Use this anywhere in the forward graph."""
+    s = torch.tensor(scale, dtype=torch.float32)
+    return STEQuantizeBFP.apply(x, s)
+
+
+# ---------------------------------------------------------------------------
+# Q1.15-aware Conv2d  (weights in Q1.15, accumulator in float32)
+# ---------------------------------------------------------------------------
+
+class Q115Conv2d(nn.Conv2d):
+    """
+    Conv2d where weights are quantized to Q1.15 (scale=1) before every
+    forward call.  The accumulation (MAC loop) remains in float32, exactly
+    as an int32 accumulator would in real hardware.
+
+    Inputs are assumed to be pre-quantized by the caller at the appropriate
+    BFP scale for their tensor type.
+    """
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w_q = ste_quantize_q115(self.weight)   # weights: Q1.15, scale=1
+        return self._conv_forward(x, w_q, self.bias)
+
+
+# ---------------------------------------------------------------------------
+# Q1.15-aware Linear  (weights in Q1.15, accumulator in float32)
+# ---------------------------------------------------------------------------
+
+class Q115Linear(nn.Linear):
+    """Linear with Q1.15-quantized weights. Same contract as Q115Conv2d."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w_q = ste_quantize_q115(self.weight)   # weights: Q1.15, scale=1
+        return nn.functional.linear(x, w_q, self.bias)
+
+
+# ---------------------------------------------------------------------------
+# Utility: snap master weights back to Q1.15 grid after optimizer step
+# ---------------------------------------------------------------------------
+
+def snap_weights_to_q115(model: nn.Module) -> None:
+    """
+    After an optimizer step, snap every parameter back to the Q1.15 (scale=1)
+    grid.  Weights are always stored with scale=1 — only activations use BFP.
+    Call this AFTER optimizer.step().
+    """
+    with torch.no_grad():
+        for param in model.parameters():
+            param.clamp_(Q115_MIN_FLOAT, Q115_MAX_FLOAT)
+            param.copy_((param * Q115_SCALE).round_() / Q115_SCALE)
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic helpers
+# ---------------------------------------------------------------------------
+
+def weight_stats_q115(model: nn.Module) -> dict:
+    """Return statistics about weight Q1.15 representation quality."""
+    total = saturated = zero = 0
+    for p in model.parameters():
+        total     += p.numel()
+        saturated += (p.abs() >= Q115_MAX_FLOAT).sum().item()
+        zero      += (p == 0).sum().item()
+    return {
+        "total_params":   total,
+        "saturated_frac": saturated / max(total, 1),
+        "zero_frac":      zero      / max(total, 1),
+        "resolution":     Q115_RESOLUTION,
+    }
