@@ -84,11 +84,10 @@ class BasicBlock(nn.Module):
 
         out = out + identity
         out = self.relu(out)
-        
-        # Apply strict Q1.15 quantization to activations
-        if self.use_q115:
-            out = ste_quantize_q115(out)
-            
+        # Activations are NOT quantized here — in real Q1.15 hardware the
+        # multiply-accumulate uses a wider int32 accumulator, so inter-layer
+        # activations live outside [-1,1).  Clamping here causes amplitude
+        # collapse (~32% saturation per block, nearly binary by layer 4).
         return out
 
 
@@ -140,11 +139,7 @@ class Bottleneck(nn.Module):
 
         out = out + identity
         out = self.relu(out)
-        
-        # Apply strict Q1.15 quantization to activations
-        if self.use_q115:
-            out = ste_quantize_q115(out)
-            
+        # Same as BasicBlock — no per-block activation quantization.
         return out
 
 
@@ -272,9 +267,7 @@ class ResNet(nn.Module):
         x = self.conv1(x)   # weights are Q1.15 via Q115Conv2d
         x = self.bn1(x)
         x = self.relu(x)
-        
-        if self.use_q115:
-            x = ste_quantize_q115(x)
+        # Stem activations stay in float32 (int32 accumulator equivalent)
 
         x = self.layer1(x)
         x = self.layer2(x)
