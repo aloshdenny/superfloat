@@ -43,7 +43,7 @@ import torchvision.transforms as T
 # ── local modules ────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 from sf16_quantizer import (
-    quantize_images_q115,
+    ste_quantize_q115,
     snap_weights_to_q115,
     weight_stats_q115,
     Q115_RESOLUTION,
@@ -129,9 +129,8 @@ def train_one_epoch(model: nn.Module,
         images, labels = images.to(device), labels.to(device)
 
         # ── Q1.15 input quantization ─────────────────────────────────────
-        # Images are already in ~[-1, 1] after normalization.
-        # We snap them to the Q1.15 grid so the forward pass is purely SF16.
-        images_q = quantize_images_q115(images)
+        # Linearly scale images to fit into [-1, 1], then apply strict Q1.15 quant.
+        images_q = ste_quantize_q115(images / 3.0)
 
         # ── forward ──────────────────────────────────────────────────────
         logits = model(images_q)
@@ -184,7 +183,7 @@ def validate(model: nn.Module,
 
     for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
-        images_q = quantize_images_q115(images)   # Q1.15 inputs
+        images_q = ste_quantize_q115(images / 3.0)   # strict Q1.15 inputs
         logits   = model(images_q)
         loss     = criterion(logits, labels)
 

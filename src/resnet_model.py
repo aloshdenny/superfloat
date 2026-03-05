@@ -84,10 +84,11 @@ class BasicBlock(nn.Module):
 
         out = out + identity
         out = self.relu(out)
-        # NOTE: we do NOT clamp activations here.  Clamping at every residual
-        # boundary causes amplitude collapse: BN outputs are ~N(0,1) so ≈32%
-        # of values would be saturated, making activations nearly binary by
-        # layer 4.  Only the *weights* are quantised (in Q115Conv2d).
+        
+        # Apply strict Q1.15 quantization to activations
+        if self.use_q115:
+            out = ste_quantize_q115(out)
+            
         return out
 
 
@@ -139,7 +140,11 @@ class Bottleneck(nn.Module):
 
         out = out + identity
         out = self.relu(out)
-        # NOTE: same as BasicBlock – no per-block activation clamp.
+        
+        # Apply strict Q1.15 quantization to activations
+        if self.use_q115:
+            out = ste_quantize_q115(out)
+            
         return out
 
 
@@ -267,6 +272,9 @@ class ResNet(nn.Module):
         x = self.conv1(x)   # weights are Q1.15 via Q115Conv2d
         x = self.bn1(x)
         x = self.relu(x)
+        
+        if self.use_q115:
+            x = ste_quantize_q115(x)
 
         x = self.layer1(x)
         x = self.layer2(x)

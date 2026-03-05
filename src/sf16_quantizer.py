@@ -220,14 +220,18 @@ class Q115Linear(nn.Linear):
 
 def snap_weights_to_q115(model: nn.Module) -> None:
     """
-    After an optimizer step, snap every parameter back to the Q1.15 (scale=1)
-    grid.  Weights are always stored with scale=1 — only activations use BFP.
-    Call this AFTER optimizer.step().
+    After an optimizer step, clamp Conv2d/Linear master weights to the Q1.15
+    representable range so they don't diverge too far.
+    We DO NOT round them here, as that would destroy the high-precision gradient
+    accumulation needed by the Straight-Through Estimator!
+    We also skip BatchNorm parameters, as they are kept in full precision.
     """
     with torch.no_grad():
-        for param in model.parameters():
-            param.clamp_(Q115_MIN_FLOAT, Q115_MAX_FLOAT)
-            param.copy_((param * Q115_SCALE).round_() / Q115_SCALE)
+        for m in model.modules():
+            if isinstance(m, (Q115Conv2d, Q115Linear)):
+                m.weight.clamp_(Q115_MIN_FLOAT, Q115_MAX_FLOAT)
+                if hasattr(m, "bias") and m.bias is not None:
+                    m.bias.clamp_(Q115_MIN_FLOAT, Q115_MAX_FLOAT)
 
 
 # ---------------------------------------------------------------------------
@@ -236,11 +240,21 @@ def snap_weights_to_q115(model: nn.Module) -> None:
 
 def weight_stats_q115(model: nn.Module) -> dict:
     """Return statistics about weight Q1.15 representation quality."""
-    total = saturated = zero = 0
-    for p in model.parameters():
-        total     += p.numel()
-        saturated += (p.abs() >= Q115_MAX_FLOAT).sum().item()
-        zero      += (p == 0).sum().item()
+    total: int = 0
+    saturated: int = 0
+    zero: int = 0
+    for m in model.modules():
+        if isinstance(m, (Q115Conv2d, Q115Linear)):
+            w = getattr(m, "weight", None)
+            if w is not None:
+                total += w.numel()
+                saturated += int((w.abs() >= Q115_MAX_FLOAT).sum().item())
+                zero += int((w == 0).sum().item())
+            b = getattr(m, "bias", None)
+            if b is not None:
+                total += b.numel()
+                saturated += int((b.abs() >= Q115_MAX_FLOAT).sum().item())
+                zero += int((b == 0).sum().item())
     return {
         "total_params":   total,
         "saturated_frac": saturated / max(total, 1),
