@@ -142,13 +142,18 @@ def main():
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--no-act-quant", action="store_true",
+                   help="quantize weights only, leaving activations in fp32")
+    p.add_argument("--measure-acts", action="store_true",
+                   help="report activation magnitudes before quantizing")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
     disable_tf32()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.out, exist_ok=True)
-    tag = f"vjepa2_{args.format}_s{args.seed}"
+    tag = f"vjepa2_{args.format}{'_wonly' if args.no_act_quant else ''}"
+    tag += f"_s{args.seed}"
 
     from transformers import AutoModel
     from video_data import build_ucf101_loaders          # local helper
@@ -158,7 +163,8 @@ def main():
     n_q = 0
     if args.format != "fp32":
         bits = int(args.format[2:])
-        n_q = apply_superfloat(backbone, bits)
+        n_q = apply_superfloat(backbone, bits,
+                               quantize_activations=not args.no_act_quant)
         scale, vmax = sf_params(bits)
         # How much of the pretrained representation the grid cannot hold.
         tot = clipped = zeroed = 0
@@ -173,6 +179,38 @@ def main():
         print(f"[superfloat] SF{bits}: {n_q} layers quantized | "
               f"{100.0*clipped/tot:.5f}% outside +/-{vmax:.4f} | "
               f"{100.0*zeroed/tot:.2f}% quantized to zero", flush=True)
+
+    if args.measure_acts:
+        # SFx clamps activations to [-1, 1]. That is benign after BatchNorm,
+        # which holds CNN activations near unit scale, but ViT residual
+        # streams accumulate across blocks. Measure before assuming.
+        seen = {}
+
+        def hook(name):
+            def fn(_m, _i, o):
+                t = o[0] if isinstance(o, tuple) else o
+                if torch.is_tensor(t):
+                    seen[name] = (t.abs().max().item(),
+                                  (t.abs() > 1).float().mean().item() * 100)
+            return fn
+
+        hs = [m.register_forward_hook(hook(n))
+              for n, m in backbone.named_modules()
+              if isinstance(m, (nn.Linear, nn.LayerNorm))]
+        backbone.to(device).eval()
+        with torch.no_grad():
+            xb, _ = next(iter(build_ucf101_loaders(
+                args.data, args.frames, args.size, 2, args.classes,
+                args.seed)[0]))
+            backbone(pixel_values_videos=xb.to(device))
+        for h in hs:
+            h.remove()
+        vals = list(seen.values())
+        over = [v[1] for v in vals]
+        print(f"[acts] {len(vals)} layers | max|a| overall="
+              f"{max(v[0] for v in vals):.2f} | mean %|a|>1 = "
+              f"{sum(over)/len(over):.2f}% | layers with >10% over 1: "
+              f"{sum(1 for o in over if o > 10)}", flush=True)
 
     backbone.to(device).eval()
     for prm in backbone.parameters():

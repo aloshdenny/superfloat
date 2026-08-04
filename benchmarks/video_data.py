@@ -10,9 +10,13 @@ Loads from the HuggingFace mirror `flwrlabs/ucf101`. Two notes on that choice:
   from the pipeline entirely; clips are reassembled here by grouping frames and
   sampling uniformly along each clip's time axis.
 
-The split is a deterministic stratified 80/20 over *clips* (never frames, which
-would leak frames of the same clip across the split), matching how the EuroSAT
-split is built, so every numeric format sees identical data.
+The split is a deterministic stratified 80/20 over *source videos*, not clips
+and not frames. UCF101 cuts each source video into ~5.25 clips on average
+(1,818 videos -> 9,537 clips here), and sibling clips are near-duplicate
+segments of the same footage. Splitting at the clip level puts ~4 of a clip's
+5 siblings in train while it sits in val, which leaks so badly that an fp32
+probe scores 100.00%. Splitting on video_id is what makes the number mean
+anything.
 """
 
 import random
@@ -51,7 +55,8 @@ class ClipDataset(Dataset):
             im = self.ds[r]["image"]
             if im.mode != "RGB":
                 im = im.convert("RGB")
-            imgs.append(torch.from_numpy(np.asarray(im)).permute(2, 0, 1))
+            # .copy(): PIL exposes a read-only buffer and torch warns on every frame
+            imgs.append(torch.from_numpy(np.asarray(im).copy()).permute(2, 0, 1))
         clip = torch.stack(imgs).float() / 255.0            # (T, C, H, W)
         clip = torch.nn.functional.interpolate(
             clip, size=(self.size, self.size), mode="bilinear",
@@ -87,26 +92,30 @@ def build_ucf101_loaders(root, frames, size, batch, max_classes, seed,
     for r in np.nonzero(sel)[0]:
         groups[(vid[r], cid[r])].append(r)
 
-    clip_rows, clip_lab, clip_cls = [], [], []
-    for key, rows in groups.items():
+    clip_rows, clip_lab, clip_cls, clip_vid = [], [], [], []
+    for (v, _c), rows in groups.items():
         rows = np.asarray(rows)
         rows = rows[np.argsort(frame_no[rows])]
         clip_rows.append(rows)
         clip_lab.append(remap[int(labels[rows[0]])])
         clip_cls.append(int(labels[rows[0]]))
+        clip_vid.append(v)
 
     clip_lab = np.asarray(clip_lab)
     clip_cls = np.asarray(clip_cls)
+    clip_vid = np.asarray(clip_vid)
 
-    # Stratified 80/20 over clips.
+    # Stratified 80/20 over SOURCE VIDEOS: every clip cut from a given video
+    # goes to the same side, so near-duplicate siblings cannot straddle it.
     rng = np.random.RandomState(seed)
     tr, va = [], []
     for c in np.unique(clip_cls):
-        idx = np.nonzero(clip_cls == c)[0]
-        rng.shuffle(idx)
-        cut = int(0.8 * len(idx))
-        tr += idx[:cut].tolist()
-        va += idx[cut:].tolist()
+        vids_c = np.unique(clip_vid[clip_cls == c])
+        rng.shuffle(vids_c)
+        cut = max(1, int(0.8 * len(vids_c)))
+        tr_v, va_v = set(vids_c[:cut].tolist()), set(vids_c[cut:].tolist())
+        for i in np.nonzero(clip_cls == c)[0]:
+            (tr if clip_vid[i] in tr_v else va).append(int(i))
 
     def subset(indices, train):
         return ClipDataset(ds, [clip_rows[i] for i in indices],
@@ -118,6 +127,7 @@ def build_ucf101_loaders(root, frames, size, batch, max_classes, seed,
                           **common)
     val_ld = DataLoader(subset(va, False), batch_size=batch, shuffle=False,
                         **common)
-    print(f"[data] {len(clip_rows)} clips over {len(keep)} classes "
-          f"-> train {len(tr)} / val {len(va)}", flush=True)
+    print(f"[data] {len(clip_rows)} clips from {len(np.unique(clip_vid))} "
+          f"videos over {len(keep)} classes -> train {len(tr)} / val {len(va)} "
+          f"(split by source video)", flush=True)
     return train_ld, val_ld, len(keep)
