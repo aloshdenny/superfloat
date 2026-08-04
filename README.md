@@ -187,6 +187,39 @@ pip install -r requirements.txt
 
 ---
 
+## **Benchmarks**
+
+[`benchmarks/`](benchmarks/) contains a full SFx evaluation across three domains,
+with FP32 and FP16 reference rows trained in the same pipeline so the
+quantization cost is measured rather than cited. See
+[benchmarks/README.md](benchmarks/README.md) for the complete tables, the run
+scripts, and the Modal apps used to produce them.
+
+| Domain | Model | Dataset | SF16 vs FP32 |
+| --- | --- | --- | --- |
+| Remote sensing classification | ConvNeXt-Tiny | EuroSAT | +0.1% (96.43 vs 96.31) |
+| UAV object detection | YOLO11x | VisDrone | −4.2% (0.2817 vs 0.2942) |
+| Satellite object detection | YOLOv8x-OBB | DOTAv1 | −4.3% (0.4298 vs 0.4489) |
+
+Headline results:
+
+- **SF8 is indistinguishable from SF16** in all three domains (<1% apart, in
+  both directions), so 7 significand bits suffice — a 75% storage reduction for
+  no measurable accuracy cost.
+- **The quantization tax is task-dependent, not format-dependent**: ~0% for
+  classification, ~4% for dense localisation.
+- **SF4 is free on classification** (96.27 ± 0.03 vs FP32's 96.31 ± 0.54, at
+  87.5% storage reduction) but costs 15–22% on detection.
+- **99.99993% of trained weights are representable**, measured on COCO-trained
+  detectors — 0 of 53.6M YOLO11x weights fall outside SF16 range, and only 15
+  fall outside SF4's tighter ±0.875.
+- Two reproducible failure modes are characterised: SF8 from random init needs
+  a smaller learning rate than SF16 (its grid is 256x coarser), and SF4 cannot
+  train from standard Kaiming init at all, because 99.98% of weights quantize
+  to exactly zero at step 0.
+
+---
+
 ## **assets/Results**
 
 The assets/results folder contains:  
