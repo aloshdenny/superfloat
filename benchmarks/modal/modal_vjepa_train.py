@@ -61,7 +61,7 @@ def prepare_ucf101():
 
 @app.function(image=image, gpu=GPU, volumes={"/vol": vol},
               timeout=60 * 60 * 12, max_containers=4)
-def train(fmt: str, classes: int = 101, epochs: int = 40, seed: int = 0):
+def train(fmt: str, classes: int = 25, epochs: int = 40, seed: int = 0):
     import os
     import subprocess
     import sys
@@ -95,6 +95,43 @@ def train(fmt: str, classes: int = 101, epochs: int = 40, seed: int = 0):
     best = json.load(open(meta))["best_val_acc"] if os.path.exists(meta) else None
     print(f"DONE {fmt} rc={rc} best={best}", flush=True)
     return {"format": fmt, "best": best, "rc": rc}
+
+
+@app.function(image=image, gpu=GPU, volumes={"/vol": vol}, timeout=60 * 45)
+def smoke():
+    """Prove the loader, the SFx surgery and a ViT forward pass all work
+    before four full runs are launched."""
+    import os
+    import sys
+    os.environ["HF_HOME"] = HF_CACHE
+    sys.path.insert(0, "/root/sfx_bench")
+    import torch, torch.nn as nn
+    from superfloat import apply_superfloat, SFLinear, sf_params
+    from video_data import build_ucf101_loaders
+    from transformers import AutoModel
+
+    tr, va, ncls = build_ucf101_loaders(HF_CACHE, 16, 256, 2, 5, 0, workers=4)
+    clips, y = next(iter(tr))
+    print(f"clip batch {tuple(clips.shape)} labels {y.tolist()}", flush=True)
+
+    m = AutoModel.from_pretrained("facebook/vjepa2-vitl-fpc64-256")
+    tot_lin = sum(1 for x in m.modules() if isinstance(x, nn.Linear))
+    n = apply_superfloat(m, 8)
+    q = sum(1 for x in m.modules() if isinstance(x, SFLinear))
+    print(f"SF8 surgery: converted={n} SFLinear={q}/{tot_lin}", flush=True)
+
+    scale, vmax = sf_params(8)
+    w = torch.cat([x.weight.detach().flatten() for x in m.modules()
+                   if isinstance(x, nn.Linear)])
+    qz = torch.round(torch.clamp(w, -vmax, vmax) * scale) / scale
+    print(f"mean|w|={w.abs().mean():.6f} zeroed={100*(qz==0).float().mean():.2f}%",
+          flush=True)
+
+    m = m.cuda().eval()
+    with torch.no_grad():
+        out = m(pixel_values_videos=clips.cuda()).last_hidden_state
+    print(f"forward OK: {tuple(out.shape)}", flush=True)
+    return {"tokens": tuple(out.shape), "classes": ncls}
 
 
 @app.local_entrypoint()

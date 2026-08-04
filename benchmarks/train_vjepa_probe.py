@@ -55,7 +55,7 @@ class AttentiveProbe(nn.Module):
 
 
 @torch.no_grad()
-def extract_features(backbone, loader, device, pool_tokens=256):
+def extract_features(backbone, loader, device, pool_tokens=64):
     """Run the (quantized) frozen backbone once and cache pooled tokens."""
     backbone.eval()
     feats, labels = [], []
@@ -133,7 +133,9 @@ def main():
                    choices=["fp32", "sf16", "sf8", "sf4"])
     p.add_argument("--data", required=True, help="UCF101 root (class subdirs)")
     p.add_argument("--out", default="runs/vjepa")
-    p.add_argument("--classes", type=int, default=101)
+    p.add_argument("--classes", type=int, default=25,
+                   help="UCF101 subset size; the full 101 classes at "
+                        "fp32 (TF32 must stay off) costs ~18h/format")
     p.add_argument("--frames", type=int, default=16)
     p.add_argument("--size", type=int, default=256)
     p.add_argument("--batch", type=int, default=4)
