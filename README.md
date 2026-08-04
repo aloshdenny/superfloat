@@ -191,9 +191,9 @@ pip install -r requirements.txt
 
 [`benchmarks/`](benchmarks/) contains a full SFx evaluation across three domains,
 with FP32 and FP16 reference rows trained in the same pipeline so the
-quantization cost is measured rather than cited. See
-[benchmarks/README.md](benchmarks/README.md) for the complete tables, the run
-scripts, and the Modal apps used to produce them.
+quantization cost is measured rather than cited. Full results are in [SUPERFLOAT_RESULTS.md](SUPERFLOAT_RESULTS.md); the run
+scripts and Modal apps are in
+[benchmarks/README.md](benchmarks/README.md).
 
 | Domain | Model | Dataset | SF16 vs FP32 |
 | --- | --- | --- | --- |

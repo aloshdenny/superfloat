@@ -22,6 +22,7 @@ benchmarks/
   modal/
     modal_sweep.py     detection sweep (20 runs)
     modal_eurosat.py   classification runs
+    modal_vjepa.py     V-JEPA 2 weight-representability analysis
 ```
 
 ## Running
@@ -48,18 +49,25 @@ fn.spawn("visdrone_pretrained_sf16")
 
 ## Results
 
-All numbers below were produced by this code. Detection is mAP50-95 on the
-validation split; classification is top-1 accuracy.
+Full tables, including precision/recall, best epochs and the failure-mode
+analyses, are in [SUPERFLOAT_RESULTS.md](../SUPERFLOAT_RESULTS.md). Summary
+below.
+
+Detection is mAP50-95 on the validation split; classification is top-1
+accuracy. The EuroSAT, VisDrone and DOTA numbers were produced by the training
+scripts here; the V-JEPA rows in the full results document come from
+`modal/modal_vjepa.py`, which is an inference-only weight-distribution study
+rather than a training run.
 
 ### EuroSAT — ConvNeXt-Tiny, from scratch, mean ± std over 3 seeds
 
 | Format | Top-1 (%) | Per-weight storage saving |
 | --- | --- | --- |
 | SF16 | **96.43 ± 0.06** | 50% |
-| FP32 | 96.31 ± 0.54 | — |
+| FP32 | 96.31 ± 0.55 | — |
 | SF8 | 96.27 ± 0.19 | 75% |
 | SF4 | 96.27 ± 0.03 | 87.5% |
-| FP16 | 96.18 ± 0.45 | 50% |
+| FP16 | 96.19 ± 0.45 | 50% |
 
 Every SuperFloat format matches full precision within seed noise, including SF4
 at an 87.5% storage reduction. The SFx runs also show markedly *lower* seed
@@ -118,7 +126,7 @@ against either, not FP32 against FP16.
 4e-3 all collapsed to 0.0748 ± 0.0017 — peaking around epoch 10-18 then decaying
 with *rising* training loss. The identical spread across seeds indicated a
 systematic cause rather than seed luck. At lr 1e-3 the same configuration trains
-normally (0.2312 by epoch 78 and still climbing). SF16 tolerates 4e-3 because
+normally (0.2361 by epoch 86). SF16 tolerates 4e-3 because
 its grid is 256x finer; a step sized for SF16 overshoots SF8's grid.
 
 **SF4 cannot be trained from random init on YOLOv8x-OBB.** Kaiming initialisation
@@ -144,6 +152,16 @@ detectors rather than assumed:
 | YOLOv8x-OBB | SF4 | 51 / 69,433,776 (0.00007%) |
 
 99.99993% of trained weights are representable even at SF4's ±0.875 bound.
+
+### Architecture agnosticity
+
+`modal/modal_vjepa.py` extends the representability analysis to V-JEPA 2
+(ViT-L, self-supervised video, LayerNorm) — a family sharing nothing with the
+CNNs above. It tests a falsifiable prediction from the SF4 result: if the
+failure is caused by initialisation scale falling below the grid's zero
+threshold, it should reproduce on any architecture whose init is similarly
+small, and pretrained weights should survive where random ones do not. See
+[SUPERFLOAT_RESULTS.md](../SUPERFLOAT_RESULTS.md) §7 and §9.
 
 ## Implementation notes
 
