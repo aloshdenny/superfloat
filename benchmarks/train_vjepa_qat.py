@@ -126,7 +126,13 @@ def main():
             loss = F.cross_entropy(out, y, label_smoothing=0.1) / args.accum
             loss.backward()
             if (i + 1) % args.accum == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                # Clip the two groups separately. Clipping model.parameters()
+                # to norm 1.0 lets the 300M-parameter backbone dominate the
+                # global norm and scales the randomly-initialised head's
+                # gradient to near nothing -- the fp32 control then sits at
+                # chance (7.5% on 25 classes) with train accuracy equally flat.
+                torch.nn.utils.clip_grad_norm_(model.backbone.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(model.head.parameters(), 5.0)
                 opt.step()
                 opt.zero_grad(set_to_none=True)
                 # Keep shadow weights representable after every update.
