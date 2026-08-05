@@ -39,10 +39,10 @@ image = (
     .add_local_dir(BENCH_DIR, remote_path="/root/sfx_bench")
 )
 
-# RTX PRO 6000 Blackwell: 95 GiB and ~125 TFLOPS fp32 non-tensor,
-# roughly 2x an H100 there. TF32 must stay disabled for SFx fidelity,
-# so tensor cores are unusable and plain fp32 throughput is what counts.
-GPU = "RTX-PRO-6000"
+# B200: 178 GiB. TF32 must stay disabled for SF16 fidelity, so tensor cores
+# are unusable and plain fp32 throughput is what counts. Measured in that
+# regime: conv3x3 3.64 ms vs 6.63 (RTX PRO 6000) and 20.29 (H100).
+GPU = "B200"
 HF_CACHE = "/vol/hf"
 FORMATS = ("fp32", "sf16", "sf8", "sf4")
 

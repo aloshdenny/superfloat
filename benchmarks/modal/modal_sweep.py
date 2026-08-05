@@ -38,16 +38,23 @@ vol = modal.Volume.from_name("sfx-baselines", create_if_missing=True)
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("libgl1", "libglib2.0-0", "libsm6", "libxext6")
+    # cu128 / torch 2.8: B200 is sm_100 and the cu124 builds only compile to
+    # sm_90 ("no kernel image is available for execution on the device").
     .pip_install(
-        "torch==2.6.0", "torchvision==0.21.0",
-        extra_index_url="https://download.pytorch.org/whl/cu124",
+        "torch==2.8.0", "torchvision==0.23.0",
+        extra_index_url="https://download.pytorch.org/whl/cu128",
     )
     .pip_install("ultralytics==8.4.115", "timm", "pandas", "matplotlib", "pyyaml")
     .env({"YOLO_CONFIG_DIR": "/vol/ultralytics_cfg"})
     .add_local_dir(BENCH_DIR, remote_path="/root/sfx_bench")
 )
 
-GPU = "H100"
+# Measured with TF32 disabled (mandatory for SF16 fidelity), which is
+# the regime these runs execute in:
+#   conv3x3   B200 3.64 ms | RTX PRO 6000 6.63 ms | H100 20.29 ms
+#   fp32 GEMM B200 63.9    | RTX PRO 6000 78.2    | H100 52.1 TFLOPS
+# Detection is convolution-dominated, so B200 wins by ~5.6x over H100.
+GPU = "B200"
 DATA_DIR = "/vol/datasets"
 
 # name -> (cfg, data yaml, imgsz, batch, init, epochs, lr)
@@ -259,6 +266,35 @@ def smoke_test():
         print(f"\n=== {res['name']} on {res['gpu']} rc={res['rc']} ===")
         for l in res["lines"]:
             print("   ", l)
+
+
+@app.function(image=image, gpu=GPU, volumes={"/vol": vol}, timeout=60 * 20)
+def verify_ckpt(name: str):
+    """Verify a torch-2.6-written Ultralytics checkpoint still loads under 2.8.
+
+    Ultralytics pickles the whole model object rather than a bare state dict,
+    so a cross-version resume is not guaranteed clean. Checking before a
+    relaunch avoids discovering it after the previous run has been killed.
+    """
+    import sys
+    sys.path.insert(0, "/root/sfx_bench")
+    import torch
+    import superfloat  # noqa: F401 -- registers SFConv2d/SFLinear for unpickling
+    path = f"/vol/runs/{name}/weights/last.pt"
+    import os
+    sz = os.path.getsize(path)
+    ck = torch.load(path, weights_only=False)
+    keys = {k: type(v).__name__ for k, v in ck.items()}
+    from superfloat import SFConv2d
+    import torch.nn as nn
+    info = {"torch": torch.__version__, "bytes": sz, "epoch": ck.get("epoch"),
+            "keys": keys}
+    m = ck.get("model") or ck.get("ema")
+    if m is not None and hasattr(m, "modules"):
+        q = sum(1 for x in m.modules() if isinstance(x, SFConv2d))
+        tot = sum(1 for x in m.modules() if isinstance(x, nn.Conv2d))
+        info["quantized"] = f"{q}/{tot}"
+    return info
 
 
 @app.local_entrypoint()
