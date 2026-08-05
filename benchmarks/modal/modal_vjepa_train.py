@@ -26,9 +26,12 @@ image = (
     # downloads fail with curl error 60 (cert verification).
     .apt_install("libgl1", "libglib2.0-0", "curl", "unzip", "unrar-free",
                  "ffmpeg", "git", "ca-certificates", "p7zip-full")
+    # cu128 / torch 2.8: the RTX PRO 6000 Blackwell is sm_120, and the cu124
+    # builds used by the detection sweep only compile to sm_90 ("no kernel
+    # image is available for execution on the device").
     .pip_install(
-        "torch==2.6.0", "torchvision==0.21.0",
-        extra_index_url="https://download.pytorch.org/whl/cu124",
+        "torch==2.8.0", "torchvision==0.23.0",
+        extra_index_url="https://download.pytorch.org/whl/cu128",
     )
     .pip_install("transformers>=4.53", "accelerate", "numpy", "pandas",
                  "huggingface_hub", "datasets", "av")
@@ -36,7 +39,10 @@ image = (
     .add_local_dir(BENCH_DIR, remote_path="/root/sfx_bench")
 )
 
-GPU = "H100"
+# RTX PRO 6000 Blackwell: 95 GiB and ~125 TFLOPS fp32 non-tensor,
+# roughly 2x an H100 there. TF32 must stay disabled for SFx fidelity,
+# so tensor cores are unusable and plain fp32 throughput is what counts.
+GPU = "RTX-PRO-6000"
 HF_CACHE = "/vol/hf"
 FORMATS = ("fp32", "sf16", "sf8", "sf4")
 
@@ -156,7 +162,9 @@ def train_qat(fmt: str, classes: int = 25, epochs: int = 15, seed: int = 0,
     cmd = [sys.executable, "/root/sfx_bench/train_vjepa_qat.py",
            "--format", fmt, "--data", HF_CACHE, "--out", out,
            "--classes", str(classes), "--epochs", str(epochs),
-           "--seed", str(seed), "--batch", "2", "--accum", "8"]
+           # batch 16 x accum 1 == the previous 2 x 8: identical effective
+           # batch, but one fused step instead of eight sequential ones.
+           "--seed", str(seed), "--batch", "16", "--accum", "1"]
     if weights_only:
         cmd.append("--no-act-quant")
     print("RUN " + " ".join(cmd), flush=True)

@@ -64,8 +64,14 @@ def main():
     p.add_argument("--accum", type=int, default=8,
                    help="gradient accumulation; effective batch = batch*accum")
     p.add_argument("--epochs", type=int, default=15)
-    p.add_argument("--lr", type=float, default=1e-4,
-                   help="fine-tune rate; SF8 needed 4x less than SF16 on YOLO")
+    p.add_argument("--lr", type=float, default=1e-5,
+                   help="BACKBONE rate. A pretrained 300M ViT-L needs ~1e-5; "
+                        "at 1e-4 the fp32 control collapsed to chance (5.12%% "
+                        "on 25 classes) within 15 epochs, destroying features "
+                        "that score 97%% under a frozen probe.")
+    p.add_argument("--head-lr", type=float, default=1e-3,
+                   help="the head is randomly initialised and needs a much "
+                        "larger rate than the pretrained backbone")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-act-quant", action="store_true")
     args = p.parse_args()
@@ -95,7 +101,12 @@ def main():
     model = VJepaClassifier(backbone, dim, ncls).to(device)
     model.backbone.gradient_checkpointing_enable()   # 300M params on video
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
+    # Separate rates: the backbone is pretrained and must be nudged, the head
+    # is random and must be learned. One shared rate cannot serve both.
+    opt = torch.optim.AdamW(
+        [{"params": model.backbone.parameters(), "lr": args.lr},
+         {"params": model.head.parameters(), "lr": args.head_lr}],
+        weight_decay=0.05)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
 
     log_path = os.path.join(args.out, f"{tag}.csv")
