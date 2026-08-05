@@ -73,6 +73,13 @@ def main():
                    help="the head is randomly initialised and needs a much "
                         "larger rate than the pretrained backbone")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--wd", type=float, default=0.05,
+                   help="Backbone weight decay. Set 0 for SF4: decay pulls "
+                        "weights toward zero, and anything dropping below "
+                        "SF4's 0.0625 floor is annihilated permanently since "
+                        "the bounded STE then gives it no gradient. SF4-QAT "
+                        "starts at 12.2%% train accuracy and decays to ~3%%, "
+                        "while SF16 under the identical config climbs.")
     p.add_argument("--no-act-quant", action="store_true")
     args = p.parse_args()
 
@@ -80,7 +87,10 @@ def main():
     disable_tf32()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.out, exist_ok=True)
-    tag = f"vjepa2qat_{args.format}{'_wonly' if args.no_act_quant else ''}_s{args.seed}"
+    tag = f"vjepa2qat_{args.format}{'_wonly' if args.no_act_quant else ''}"
+    if args.wd != 0.05:
+        tag += f"_wd{args.wd:g}"
+    tag += f"_s{args.seed}"
 
     from transformers import AutoModel
     from video_data import build_ucf101_loaders
@@ -104,9 +114,10 @@ def main():
     # Separate rates: the backbone is pretrained and must be nudged, the head
     # is random and must be learned. One shared rate cannot serve both.
     opt = torch.optim.AdamW(
-        [{"params": model.backbone.parameters(), "lr": args.lr},
-         {"params": model.head.parameters(), "lr": args.head_lr}],
-        weight_decay=0.05)
+        [{"params": model.backbone.parameters(), "lr": args.lr,
+          "weight_decay": args.wd},
+         {"params": model.head.parameters(), "lr": args.head_lr,
+          "weight_decay": 0.05}])
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
 
     log_path = os.path.join(args.out, f"{tag}.csv")

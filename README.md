@@ -189,34 +189,101 @@ pip install -r requirements.txt
 
 ## **Benchmarks**
 
-[`benchmarks/`](benchmarks/) contains a full SFx evaluation across three domains,
-with FP32 and FP16 reference rows trained in the same pipeline so the
-quantization cost is measured rather than cited. Full results are in [SUPERFLOAT_RESULTS.md](SUPERFLOAT_RESULTS.md); the run
-scripts and Modal apps are in
-[benchmarks/README.md](benchmarks/README.md).
+[`benchmarks/`](benchmarks/) evaluates SFx across four architecture families
+with FP32 and FP16 reference rows trained in the same pipeline, so the
+quantization cost is measured rather than cited. Full tables and failure-mode
+analyses: [SUPERFLOAT_RESULTS.md](SUPERFLOAT_RESULTS.md). Scripts and Modal
+apps: [benchmarks/README.md](benchmarks/README.md).
+
+![Validation trajectories](benchmarks/figures/format_overlay.png)
+
+### Results measured in this repository
 
 | Domain | Model | Dataset | SF16 vs FP32 |
 | --- | --- | --- | --- |
-| Remote sensing classification | ConvNeXt-Tiny | EuroSAT | +0.1% (96.43 vs 96.31) |
-| UAV object detection | YOLO11x | VisDrone | −4.2% (0.2817 vs 0.2942) |
-| Satellite object detection | YOLOv8x-OBB | DOTAv1 | −4.3% (0.4298 vs 0.4489) |
+| Remote sensing classification | ConvNeXt-Tiny | EuroSAT | **+0.1%** (96.43 vs 96.31) |
+| UAV object detection | YOLO11x | VisDrone | −4.3% (0.2817 vs 0.2942) |
+| Satellite object detection | YOLOv8x-OBB | DOTAv1 | −4.2% (0.4298 vs 0.4489) |
+| Video, self-supervised ViT | V-JEPA 2 ViT-L | UCF101 | **+8.1%** (85.56 vs 77.51) |
 
-Headline results:
+- **SF8 is indistinguishable from SF16** in every domain (<1% apart, in both
+  directions) — 7 significand bits suffice, for a 75% storage reduction.
+- **SF8 and SF16 beat full precision on V-JEPA 2** under weights-only
+  quantization: 83.91 and 85.56 against an FP32 control at 77.51, on identical
+  schedules.
+- **SF4 is free on classification** (96.27 ±0.03 vs FP32's 96.31 ±0.55, at
+  87.5% storage reduction) but costs 15–22% on dense localisation.
+- **99.99993% of trained weights are representable** — 0 of 53.6M YOLO11x
+  weights fall outside SF16 range, and only 15 outside SF4's tighter ±0.875.
 
-- **SF8 is indistinguishable from SF16** in all three domains (<1% apart, in
-  both directions), so 7 significand bits suffice — a 75% storage reduction for
-  no measurable accuracy cost.
-- **The quantization tax is task-dependent, not format-dependent**: ~0% for
-  classification, ~4% for dense localisation.
-- **SF4 is free on classification** (96.27 ± 0.03 vs FP32's 96.31 ± 0.54, at
-  87.5% storage reduction) but costs 15–22% on detection.
-- **99.99993% of trained weights are representable**, measured on COCO-trained
-  detectors — 0 of 53.6M YOLO11x weights fall outside SF16 range, and only 15
-  fall outside SF4's tighter ±0.875.
-- Two reproducible failure modes are characterised: SF8 from random init needs
-  a smaller learning rate than SF16 (its grid is 256x coarser), and SF4 cannot
-  train from standard Kaiming init at all, because 99.98% of weights quantize
-  to exactly zero at step 0.
+![Accuracy retained vs storage saved](benchmarks/figures/accuracy_vs_storage.png)
+
+### Two reproducible failure modes
+
+![Failure modes](benchmarks/figures/failure_modes.png)
+
+**Weight quantization is architecture-agnostic; activation quantization is
+not.** Clamping activations to [−1, 1] is nearly free after BatchNorm, which
+holds CNN activations near unit scale. A ViT residual stream accumulates across
+24 blocks: measured max |a| = **256.1**, with **26.3%** of activations outside
+the bound across 193 of 292 layers. Quantization-aware training does not
+recover it.
+
+**Usable learning rate must match grid resolution, from both sides.** SF8 from
+random init diverges at the FP32 recipe's 4e-3 (0.0748 ±0.0017 over 3 seeds)
+and trains normally at 1e-3, because its grid is 256× coarser than SF16's. SF4
+fails in the opposite direction: standard Kaiming init places weights an order
+of magnitude below its 0.0625 floor, zeroing **99.98%** of them at step 0.
+
+### Prior results from the paper
+
+The tables below are from the SuperFloat paper, not re-measured here. They
+cover ResNet depths on CIFAR and ImageNet, and the GPT-2/GPT-3 weight
+distribution and convergence studies in
+[assets/results](assets/results/).
+
+**CIFAR-10 top-1 (%), mean ± std over 3 seeds**
+
+| Format | R20 | R32 | R44 | R56 |
+| --- | --- | --- | --- | --- |
+| FP32 | 87.4 ±0.1 | 87.7 ±0.1 | 88.4 ±0.2 | 88.5 ±0.3 |
+| FP16 | 87.4 ±0.1 | 88.0 ±0.1 | 88.3 ±0.4 | 88.6 ±0.2 |
+| SF16 | 86.9 ±0.3 | 86.8 ±0.3 | 71.5 ±10.4 | 47.1 ±12.0 |
+| SF8 | 86.8 ±0.2 | 86.9 ±0.1 | 82.7 ±0.5 | 74.1 ±9.9 |
+| SF4 | 86.5 ±0.3 | 86.2 ±0.2 | 83.7 ±0.3 | 77.7 ±0.1 |
+
+**CIFAR-100 top-1 (%), mean ± std over 3 seeds**
+
+| Format | R20 | R32 | R44 | R56 |
+| --- | --- | --- | --- | --- |
+| FP32 | 56.7 ±0.1 | 58.1 ±0.6 | 58.8 ±0.2 | 59.0 ±0.2 |
+| FP16 | 57.0 ±0.2 | 58.0 ±0.3 | 58.4 ±0.1 | 58.7 ±0.2 |
+| SF16 | 52.7 ±0.7 | 55.4 ±0.3 | 17.3 ±8.1 | 15.5 ±9.2 |
+| SF8 | 52.7 ±0.4 | 55.8 ±0.4 | 38.4 ±6.7 | 29.3 ±6.1 |
+| SF4 | 51.7 ±0.3 | 54.4 ±0.5 | 48.6 ±1.4 | 36.8 ±1.8 |
+
+**ImageNet-1K top-1 (%), single seed, 50 epochs**
+
+| Format | R20 | R32 | R44 | R56 |
+| --- | --- | --- | --- | --- |
+| FP32 | 69.4 | 74.3 | 77.3 | 72.6 |
+| FP16 | 69.95 | 74.5 | 74.5 | 72.8 |
+| SF16 | 69.08 | 65.1 | 62.2 | 63.8 |
+| SF8 | 69.17 | 74.1 | 63.9 | 63.5 |
+| SF4 | 66.25 | 69.2 | 65.5 | 64.3 |
+
+**Language models.** GPT-2 (124M) and GPT-3 (125M) trained on Fineweb-100B for
+1 epoch; weight-distribution plots for GPT-2/3, Llama-2-7B, Mistral-7B,
+Qwen2-7B, MiniCPM-V and Japanese StableLM are in
+[assets/results/LLM Distribution](assets/results/LLM%20Distribution/), and
+YOLOv5/v7 layer-wise distributions alongside them. ~99% of parameters in every
+case fall within [−1, 1].
+
+The benchmarks in this repository extend that picture in one important way: the
+CIFAR tables show SFx destabilising at depth with large seed variance
+(SF16 at R56: 47.1 ±12.0), whereas the modern-architecture results here are
+stable, and the instabilities that do appear have identified, reproducible
+causes rather than seed dependence.
 
 ---
 

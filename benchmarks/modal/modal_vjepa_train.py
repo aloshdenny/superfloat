@@ -149,7 +149,7 @@ def smoke():
 @app.function(image=image, gpu=GPU, volumes={"/vol": vol},
               timeout=60 * 60 * 20, max_containers=4)
 def train_qat(fmt: str, classes: int = 25, epochs: int = 15, seed: int = 0,
-              weights_only: bool = False):
+              weights_only: bool = False, wd: float = 0.05):
     """End-to-end SFx QAT: the backbone is quantized and trained through."""
     import os
     import subprocess
@@ -167,9 +167,13 @@ def train_qat(fmt: str, classes: int = 25, epochs: int = 15, seed: int = 0,
            "--seed", str(seed), "--batch", "16", "--accum", "1"]
     if weights_only:
         cmd.append("--no-act-quant")
+    if wd != 0.05:
+        cmd += ["--wd", str(wd)]
     print("RUN " + " ".join(cmd), flush=True)
 
     suffix = "_wonly" if weights_only else ""
+    if wd != 0.05:
+        suffix += f"_wd{wd:g}"
     log = f"/vol/vjepaqat_{fmt}{suffix}_s{seed}.log"
     with open(log, "w") as fh:
         proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,

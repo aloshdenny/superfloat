@@ -207,7 +207,11 @@ def train_baseline(name: str):
             # Flush every line: buffering lost the entire log of every job the
             # first time containers were killed, leaving nothing to diagnose.
             log.flush()
-            if i % 200 == 0:
+            # Commit when an epoch closes, not on a line counter. Ultralytics
+            # writes last.pt per epoch inside the container, but only a commit
+            # persists it -- a line-count cadence once discarded 78 epochs when
+            # a job was cancelled between commits.
+            if "it/s]" in line and "/300" in line or i % 200 == 0:
                 vol.commit()
             # keep Modal's own log readable
             if any(k in line for k in ("[init]", "[superfloat]", "epochs completed",
@@ -295,6 +299,49 @@ def verify_ckpt(name: str):
         tot = sum(1 for x in m.modules() if isinstance(x, nn.Conv2d))
         info["quantized"] = f"{q}/{tot}"
     return info
+
+
+@app.function(image=image, volumes={"/vol": vol}, timeout=60 * 30, cpu=8)
+def retune_io2(name: str, cache: str = "ram", workers: int = 16):
+    """Patch a checkpoint's stored dataloader settings, nothing else.
+
+    Ultralytics restores train_args from the checkpoint on resume, so passing
+    new flags is ignored. VisDrone runs dataloader-bound: mosaic=1.0 means four
+    large JPEGs decoded per sample, every epoch, with cache=False -- 2.7 it/s
+    at batch 8 on a B200 that should be far faster.
+
+    Only `cache` and `workers` are touched. Weights, optimizer state, epoch
+    counter and every hyperparameter that affects the math are left alone, so
+    this is an I/O change and not a recipe change. The original is backed up
+    first, since a truncated checkpoint has already cost us one run.
+    """
+    import shutil
+    import sys
+    sys.path.insert(0, "/root/sfx_bench")
+    import torch
+    import superfloat  # noqa: F401 -- needed to unpickle SFConv2d/SFLinear
+
+    path = f"/vol/runs/{name}/weights/last.pt"
+    backup = f"/vol/runs/{name}/weights/last_preio.pt"
+    shutil.copyfile(path, backup)
+
+    # map_location: the checkpoint holds CUDA tensors and this runs CPU-only.
+    ck = torch.load(path, weights_only=False, map_location="cpu")
+    ta = ck.get("train_args") or {}
+    before = {k: ta.get(k) for k in ("cache", "workers", "batch", "epochs",
+                                     "lr0", "weight_decay", "imgsz")}
+    ta["cache"] = cache
+    ta["workers"] = workers
+    ck["train_args"] = ta
+    torch.save(ck, path)
+
+    # Reload to prove the write is intact before the backup is trusted away.
+    rt = torch.load(path, weights_only=False, map_location="cpu")
+    after = {k: rt["train_args"].get(k) for k in before}
+    ok = rt.get("epoch") == ck.get("epoch") and rt.get("ema") is not None
+    vol.commit()
+    return {"before": before, "after": after, "epoch": rt.get("epoch"),
+            "reload_ok": ok, "backup": backup}
 
 
 @app.local_entrypoint()
