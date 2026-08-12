@@ -180,8 +180,8 @@ def build(results_dir, outdir):
     for sub, tag, ttl in (("vjepa", "ptq", "V-JEPA 2 ViT-L / UCF101 — PTQ, weights-only"),
                           ("vjepa_qat", "qat", "V-JEPA 2 ViT-L / UCF101 — QAT, weights-only")):
         specs = []
-        for fmt in FORMATS:
-            key = fmt if fmt in ("fp32", "fp16") else f"{fmt}_wonly"
+        for fmt in ["fp32", "sf16", "sf8"]:
+            key = fmt if fmt == "fp32" else f"{fmt}_wonly"
             got = vjepa(results_dir, sub, key)
             if got:
                 specs.append((f"{LABEL[fmt]} (UCF101)", *got, COLOR[fmt]))
@@ -219,11 +219,12 @@ def overlay(results_dir, outdir):
            for f in FORMATS if classification(results_dir, f)]
     if cls:
         panels.append(("EuroSAT / ConvNeXt-Tiny", "Top-1 accuracy (%)", cls))
+    VJ_FORMATS = ["fp32", "sf16", "sf8"]
     vj = [(f, *vjepa(results_dir, "vjepa_qat",
-                     f if f in ("fp32", "fp16") else f"{f}_wonly")[::2], False)
-          for f in FORMATS
+                     f if f == "fp32" else f"{f}_wonly")[::2], False)
+          for f in VJ_FORMATS
           if vjepa(results_dir, "vjepa_qat",
-                   f if f in ("fp32", "fp16") else f"{f}_wonly")]
+                   f if f == "fp32" else f"{f}_wonly")]
     if vj:
         panels.append(("V-JEPA 2 / UCF101 (QAT, weights-only)",
                        "Top-1 accuracy (%)", vj))
