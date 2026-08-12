@@ -1,193 +1,59 @@
-# **Superfloat: Accelerators for AI on Edge. Reimagined.**
+# Superfloat: Accelerators for AI on Edge. Reimagined.
 
-This repository contains the code, methods, and scripts for implementing **Superfloat Quantization** and **Lottery Ticket Hypothesis (LTH)** techniques for optimizing neural networks. The repository focuses on various quantization algorithms, model evaluations, and fine-tuning techniques to minimize perplexity and stabilize activations.
+Superfloat (SFx) is a parameter-aware numeric schema for deep learning
+inference: it discards the exponent field entirely and spends every bit beyond
+the sign on the significand. The premise is a measured property of trained
+networks rather than an approximation of floating point — weights are bounded
+and concentrated near zero, so the dynamic range an exponent buys is largely
+unused at inference time.
 
----
+This repository holds the format definition, the training and benchmark suite,
+and the measured results. The silicon, the compiler and the website live in
+their own repositories:
 
-## **What is Superfloat?**  
-
-**Superfloat** is a custom quantization algorithm that operates with a **scalable precision format**. Unlike traditional floating-point systems (IEEE-754), Superfloat removes the mantissa entirely and focuses solely on the **exponent** for precision representation.  
-
-### **Key Features**:  
-1. **Sign-Exponent Representation**:  
-   - Superfloat (SFx) uses `1 bit` for the **sign** and allocates the remaining `x-1 bits` for the **exponent**.  
-   - For instance, in **SF16**:  
-     - 1 bit → Sign  
-     - 15 bits → Exponent  
-
-2. **Clamping Range**:  
-   - All values are clamped within the range `[-1, 1]`. This ensures activation and parameter stability, reducing the likelihood of exploding or vanishing gradients.
-
-3. **Bit-width Flexibility**:  
-   - Superfloat supports variable precision formats, scaling between **3-bit and 16-bit**:  
-     - Lower precision (e.g., **SF4**) → Faster computation, reduced model size.  
-     - Higher precision (e.g., **SF16**) → Improved accuracy while maintaining efficient quantization.
-
-4. **Gradient and Activation Capping**:  
-   - To stabilize the training process, gradients and activations are **capped** at -1 and +1.
-
-### **Advantages of Superfloat**:  
-- Saves **precision** without a significant drop in accuracy.  
-- Reduces **computational complexity** compared to traditional floating-point representations.  
-- Allows adaptive scaling for diverse quantization requirements.
+| Repository | What it is |
+| --- | --- |
+| [superfloat.gpu](https://github.com/aloshdenny/superfloat.gpu) | Atreides — the Q1.15 (SF16) accelerator RTL, ISA and Sky130 hardening |
+| [superfloat.llvm](https://github.com/aloshdenny/superfloat.llvm) | Clang/LLVM fork adding `sf16` as a first-class builtin type |
+| [superfloat-site](https://github.com/aloshdenny/superfloat-site) | Project website |
+| [superfloat.cuda](https://github.com/aloshdenny/superfloat.cuda) | CUDA/C++ kernels |
 
 ---
 
-**Conversion FP32 - SF(4-16)**
+## What is Superfloat?
 
-A standard 32-bit floating-point number is converted into a custom superfloat representation with a variable-sized mantissa.
+SFx allocates **1 sign bit and `x−1` significand bits. There is no exponent
+field and no integer bit.** This makes SFx mathematically identical to a signed
+fixed-point format, Q1.(x−1):
 
-- **Clamp Input Range** – The input value is restricted to the range (-1, 1). If the value exceeds this, it is set to a predefined maximum value.
-    
-- **Extract Sign Bit** – The sign bit is determined and stored separately, while the value is converted to its absolute form.
-    
-- **Compute Mantissa** – The fractional value is scaled by `2^mantissa_bits` to convert it into an integer representation.
-    
-- **Bit Packing** – The sign bit and mantissa are arranged into a custom format, with the mantissa shifted to fit within a float-sized bit structure.
-    
-- **Bitwise Reinterpretation** – The constructed bit pattern is reinterpreted as a floating-point number and returned.
-
----
-## **What is WASQ?**  
-
-**WASQ** stands for **Weight and Activation Superfloat Quantization**. It is a **hybrid quantization framework** that leverages Superfloat precision to optimize both model weights and activations.
-
-### **Key Characteristics of WASQ**:  
-1. **Weight Quantization**:  
-   - Model weights are converted to **Superfloat precision** (SFx) without requiring complex computations like mantissa adjustments.  
-
-2. **Activation Quantization**:  
-   - Activations are clamped and quantized within a stable range to prevent issues such as exploding activations.
-
-3. **Optimization Algorithms**:  
-   - WASQ includes customized algorithms like **WASQ OPT** and **Full Parameter Method (FPM)** to balance accuracy and convergence speed.
-   - New: **Simulated Annealing Multi-Prize Lottery Ticket (SA-MPLTH)** algorithm for healing quantized models
-
-4. **Scalability**:  
-   - WASQ supports **multi-bit quantization** (from 4-bit to 16-bit), making it adaptable for different deployment environments, such as:  
-     - **Edge devices** → Lower precision for speed and memory savings.  
-     - **Servers** → Higher precision for accuracy-sensitive tasks.
-
-### **WASQ + Lottery Ticket Hypothesis (LTH)**  
-WASQ integrates **LTH** to identify specific weights that are critical for maintaining model performance after quantization. By fine-tuning only the **essential weights**, WASQ reduces computational overhead while achieving high accuracy.
-
----
-
-## **Files Overview**
-
-1. **[Quant_Dequant.ipynb](Quant_Dequant.ipynb)**  
-   Contains the implementation of basic Superfloat quantization and dequantization functions.
-
-2. **[sf16quant.ipynb](sf16quant.ipynb)**  
-   Builds on Superfloat quantization functions, specifically for **SF16 precision**.
-
-3. **[lth_analysis.py](lth_analysis.py)**  
-   Analyzes **activation magnitude distribution** for **LTH**. It compares activation patterns of original and quantized models.
-
-4. **[lth_trainer.py](lth_trainer.py)**  
-   The **LTH trainer** script for fine-tuning models based on the Lottery Ticket Hypothesis technique.
-
-5. **[wasq_eval.py](wasq_eval.py)**  
-   Calculates **perplexity** for a series of models, grouped by context length, epochs, or model species.
-
-6. **[wasq_inference.py](wasq_inference.py)**  
-   Provides inference capabilities for **individual** or **multiple WASQ-quantized models**.
-
-7. **[wasq_fasteropt.py](wasq_fasteropt.py)**  
-   An optimized version of the **OPT algorithm** implemented in `wasq_opt.py`.
-
-8. **[wasq_opt.py](wasq_opt.py)**  
-   Core implementation of the WASQ OPT algorithm.
-
-9. **[wasq_fpm.py](wasq_fpm.py)**  
-   Implements the **Full Parameter Method** (FPM) for WASQ quantization.
-
-10. **[wasq_vanilla.py](wasq_vanilla.py)**  
-    Baseline implementation of the **Vanilla algorithm** for WASQ.
-
-11. **[sa_mplth.py](sa_mplth.py)**  
-    New: Implements Simulated Annealing Multi-Prize Lottery Ticket Hypothesis for healing quantized models.
-
-12. **[assets/results](assets/results/)**  
-    Contains outputs of model tests, perplexity scores, and supplementary studies.
-
----
-
-## **Scaling Laws**
-
-### 1. **Maximum Context Length Barrier - Perplexity Factor**  
-For a model with `n` parameters, a calibration dataset of maximum input length `c`, **three-shot quantization fine-tuning**, and Superfloat precision bit `x` (where `4 ≤ x ≤ 16`):  
-
-\[
-P = f(n, c, 3, x)
-\]
-
-- **Lower P** indicates better model understanding and calibration performance.
-
----
-
-### 2. **Maximum Neuron Spread Factor**  
-This scaling law uses the **Lottery Ticket Hypothesis** for WASQ quantization to stabilize activations:
-
-1. Perform a forward pass using the **original model** and record the average magnitudes of activations across all layers.  
-2. Perform the same for the **vanilla quantized model** to observe how quantization impacts activation magnitudes.  
-3. Rank layers based on the **difference in activation magnitudes** between the original and quantized models.  
-4. Identify and **cluster layers** with significant deviations to address issues like exploding/vanishing activations.  
-5. Fine-tune or analyze these clusters to ensure stable activations and minimal performance degradation.
-
-The law establishes that the **maximum neuron spread** (region targeted for fine-tuning/updating) is a function of:  
-- **Activation magnitude**  
-- **Activation fracture** (spread of how a weight affects neighboring weights during backpropagation)
-
----
-
-## **Quantization Algorithms**
-
-The repository explores three quantization approaches:
-
-1. **Superfloat Precision**: Custom precision without mantissa, clamped within `[-1, 1]` for stability.  
-2. **WASQ OPT**: Optimized quantization with faster convergence.  
-3. **Full Parameter Method (FPM)**: Retrains all parameters for higher accuracy.
-4. **SA-MPLTH**: New simulated annealing approach for healing quantized models.
-
----
-
-## **Usage**
-
-### **Setup**  
-Clone the repository and install dependencies:
-
-```bash
-git clone https://github.com/aloshdenny/superfloat
-cd superfloat
-pip install -r requirements.txt
+```
+value = (−1)^sign × Σ b_i · 2^(−i)      for i = 1 … x−1
 ```
 
-### **Running Scripts**  
+| Format | Notation | Scale | Representable range |
+| --- | --- | --- | --- |
+| SF16 | 1.15 | 2^15 = 32768 | ±0.999969482421875 |
+| SF8 | 1.7 | 2^7 = 128 | ±0.9921875 |
+| SF4 | 1.3 | 2^3 = 8 | ±0.875 |
 
-- Train with **LTH**:  
-   ```bash
-   python lth_trainer.py
-   ```
+The schema is defined for any bit width; intermediate members such as SF14 or
+SF6 are constructed identically. SF16, SF8 and SF4 are the three points carried
+through to hardware and evaluated here.
 
-- Evaluate Perplexity:  
-   ```bash
-   python wasq_eval.py
-   ```
+Every SFx variant is backward compatible: exact conversion without additional
+quantization is possible when the source floating point format provides at
+least `x−1` effective significand bits.
 
-- Perform Inference:  
-   ```bash
-   python wasq_inference.py
-   ```
+**Why this works.** Measured across trained model families, ~99.999% of
+parameters already fall inside `[−1, 1]` — 0 of 53.6M YOLO11x weights fall
+outside SF16's range, and only 15 outside SF4's tighter ±0.875. The exponent is
+paying for range that trained weights do not use.
 
-- Run SA-MPLTH:  
-   ```bash
-   python sa_mplth.py
-   ```
+![Float vs Superfloat](assets/results/FloatvsSuperfloat.jpg)
 
 ---
 
-## **Benchmarks**
+## Benchmarks
 
 [`benchmarks/`](benchmarks/) evaluates SFx across four architecture families
 with FP32 and FP16 reference rows trained in the same pipeline, so the
@@ -213,14 +79,8 @@ apps: [benchmarks/README.md](benchmarks/README.md).
   schedules.
 - **SF4 is free on classification** (96.27 ±0.03 vs FP32's 96.31 ±0.55, at
   87.5% storage reduction) but costs 15–22% on dense localisation.
-- **99.99993% of trained weights are representable** — 0 of 53.6M YOLO11x
-  weights fall outside SF16 range, and only 15 outside SF4's tighter ±0.875.
-
-![Accuracy retained vs storage saved](benchmarks/figures/accuracy_vs_storage.png)
 
 ### Two reproducible failure modes
-
-![Failure modes](benchmarks/figures/failure_modes.png)
 
 **Weight quantization is architecture-agnostic; activation quantization is
 not.** Clamping activations to [−1, 1] is nearly free after BatchNorm, which
@@ -239,8 +99,7 @@ of magnitude below its 0.0625 floor, zeroing **99.98%** of them at step 0.
 
 The tables below are from the SuperFloat paper, not re-measured here. They
 cover ResNet depths on CIFAR and ImageNet, and the GPT-2/GPT-3 weight
-distribution and convergence studies in
-[assets/results](assets/results/).
+distribution and convergence studies in [assets/results](assets/results/).
 
 **CIFAR-10 top-1 (%), mean ± std over 3 seeds**
 
@@ -275,9 +134,8 @@ distribution and convergence studies in
 **Language models.** GPT-2 (124M) and GPT-3 (125M) trained on Fineweb-100B for
 1 epoch; weight-distribution plots for GPT-2/3, Llama-2-7B, Mistral-7B,
 Qwen2-7B, MiniCPM-V and Japanese StableLM are in
-[assets/results/LLM Distribution](assets/results/LLM%20Distribution/), and
-YOLOv5/v7 layer-wise distributions alongside them. ~99% of parameters in every
-case fall within [−1, 1].
+[assets/results/LLM Distribution](assets/results/LLM%20Distribution/), with
+YOLOv5/v7 layer-wise distributions alongside them.
 
 The benchmarks in this repository extend that picture in one important way: the
 CIFAR tables show SFx destabilising at depth with large seed variance
@@ -287,76 +145,173 @@ causes rather than seed dependence.
 
 ---
 
-## **assets/Results**
+## Chip-1: Atreides
 
-The assets/results folder contains:  
-- **Perplexity scores** for different model configurations.  
-- **Activation magnitude comparisons** before and after quantization.  
-- Supplementary studies showcasing model performance.
+Atreides is an ASIC accelerator built for SFx inference: a Q1.15 fixed-point
+GPU with a redesigned systolic array, a custom 16-bit ISA and fused
+multiply-add units that carry no exponent hardware. RTL, testbenches and the
+Sky130 hardening flow are in
+[superfloat.gpu](https://github.com/aloshdenny/superfloat.gpu).
 
----
+Silicon configuration: 2 cores × 2 threads, one 2×2 systolic array per core
+(8 MAC units), 128 B address-mapped on-die scratchpad, 8×4 Tiny Tapeout tiles,
+50 MHz target.
 
-## **Chip-1: Atreides**
+![Chip-1 Architecture](assets/results/atreides_architecture.png)
 
-Atreides is an ASIC accelerator designed specifically for Superfloat-based inference. We redesigned the systolic array to support SFx operations, adopting a modded RV32 ISA and faster Fused-Multiply-Adder (FMA) units. The end goal is not convention—it's breaking the rules of computing and physics to achieve faster inference, lower memory consumption, and the same accuracy.
+### FMA unit
 
-## FMA in Atreides
-
-Below is an image showing the FMA in Atreides:
+The FMA is where removing the exponent pays. Sign is computed by XOR, the
+significands go through a 15×15 unsigned multiply, and the result saturates
+into Q1.15 with a 32-bit internal accumulator. There is no exponent-difference
+barrel shifter, no leading-zero detector and no round-to-nearest-even packing.
 
 ![FMA](assets/results/FMA.png)
 
-## Expanded View of Chip-1's Architecture
+### Measured hardening results
 
-An expanded view of Chip-1's architecture includes non-unified memory blocks (subject to unification), cache, control store (modded RV32 ISA), and an array of FMAs:
+Post-place-and-route, Sky130 HD, 20 ns (50 MHz) constraint. All four levels
+close with zero DRC, LVS and antenna violations.
 
-![Chip-1 Architecture](assets/results/hardware%20architecture.png)
+| Design | WNS (ns) | Worst slack (ns) | Implied Fmax (MHz) | Core area (µm²) | Util | Power (W) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Processing Element | 0.0 | 6.73 | 75.3 | 26268.9 | 0.691 | 0.00273 |
+| Systolic Array | 0.0 | 7.62 | 80.8 | 99382.8 | 0.865 | 0.00696 |
+| Core | 0.0 | 0.93 | 52.5 | 451496 | 0.288 | 0.01224 |
+| Accelerator | 0.0 | 3.95 | 62.3 | 694446 | 0.545 | 0.02165 |
 
-### FPGA Functional Units Design
+Against IEEE baselines hardened through the identical flow, at iso clock
+period and iso library:
 
-#### 1. 8 x 16-bit Shift Register (simplified)
+| Metric | SF16 PE | IEEE FP16 PE | IEEE FP32 PE |
+| --- | --- | --- | --- |
+| Stdcell area (µm²) | 18147.4 | 25396.9 (1.40×) | 96919.2 (5.34×) |
+| Setup slack (ns) | +6.726 | +0.177 | −5.045 |
+| Implied Fmax (MHz) | 75.34 | 50.45 | 39.93 |
+| Meets 50 MHz | yes | yes | no (69 violating paths) |
 
-![FPGA Floorplan](assets/results/shift_register.png)
+The advantage compounds at array granularity: a 2×2 IEEE FP16 systolic array is
+1.63× the SF16 array's stdcell area (139775 vs 85931.2 µm²) and misses the
+50 MHz target by 0.42 ns, while the SF16 array closes with 7.62 ns of margin.
 
-#### 2. Activation Unit (simplified)
+One honest caveat: at full-chip level the critical path leaves the arithmetic
+datapath and lands in memory address generation, so chip-level Fmax is bounded
+by the memory subsystem rather than by the numeric format.
 
-![FPGA Floorplan](assets/results/activation_unit.png)
+### Instruction set
 
-#### 3. Cycle Count Logic
+Atreides implements a 14-instruction, 16-bit ISA in a 4-field register-register
+encoding. Integer ops handle indexing, addressing and control flow; FMA and ACT
+are reserved for Q1.15 matrix math so accumulation precision is never lost to
+the integer path.
 
-![FPGA Floorplan](assets/results/cycle_count_logic.png)
+```
+[OPCODE 15:12] [Rd 11:8] [Rs 7:4] [Rt 3:0]
+```
 
-## Instruction Set
+| Opcode | Mnemonic | Operands | Description |
+| --- | --- | --- | --- |
+| 0000 | NOP | — | No operation |
+| 0001 | BRnzp | offset9 | Branch on nzp flags to PC + 1 + sign_extend(offset9) |
+| 0010 | CMP | Rd, Rs | Compare integers, set nzp flags |
+| 0011 | ADD | Rd, Rs, Rt | Integer add |
+| 0100 | SUB | Rd, Rs, Rt | Integer subtract |
+| 0101 | MUL | Rd, Rs, Rt | Integer multiply, 16-bit zero-extended result |
+| 0110 | DIV | Rd, Rs, Rt | Integer divide, hardware reciprocal |
+| 0111 | LDR | Rd, Rs | Load 16-bit word from data memory at address Rs |
+| 1000 | STR | Rd, Rs | Store 16-bit word from Rs to address Rd |
+| 1001 | CONST | Rd, imm8 | Load 8-bit sign-extended immediate |
+| 1010 | FMA | Rd, Rs, Rt | Q1.15 fused multiply-accumulate: Rd = (Rs × Rt) + Rd |
+| 1011 | ACT | Rd, Rs, Rt | Bias-add + activation (passthrough / ReLU / leaky / clipped) |
+| 1100 | SYS | op, idx | Systolic array control (clear / load / compute / read) |
+| 1111 | RET | — | Return from kernel |
 
-The current instruction set for the FPGA architecture is show below:
+Each thread owns 16 registers: `R0`–`R12` are general purpose read/write, and
+`R13`–`R15` are hardwired read-only SIMD index registers (`%blockIdx`,
+`%blockDim`, `%threadIdx`) that give a thread its coordinate without dedicated
+addressing hardware.
 
-| Instruction | Opcode(4) | Op 1(4) | Op 2(4) | Op 3(4) | Description                                                                           |
-|-------------|-----------|---------|---------|---------|---------------------------------------------------------------------------------------|
-| STR         | 0001      | addr    | row     | col     | Stores the matrix data from activation unit buffer into specified address in memory   |
-| LDR         | 0010      | addr    | row     | col     | Loads the matrix at addr into the Row Shift Buffer                                    |
-| LDC         | 0011      | addr    | row     | col     | Loads the matrix at addr into the Column Shift Buffer                                 |
-| MATMUL      | 0100      | -       | -       | -       | Performs matrix multiplication using data in Row Shift Buffer and Column Shift Buffer |
-| RELU        | 0101      | -       | -       | -       | Performs ReLU activation function on Systolic Array output                            |
-| LIN         | 0110      | -       | -       | -       | Performs Linear activation function on Systolic Array output                          |
-| NOP         | 0000      | -       | -       | -       | No Operation                                                                          |
-
-### FPGA floorplan (ISA integrated)
-
-The FPGA floorplan integrated with instruction set is shown below:
-
-![FPGA Floorplan](assets/results/isa_integrated_floorplan.png)
+Throughput: 400 × 10⁶ MAC/s across the systolic paths (8 PEs × 1 MAC/cycle ×
+50 MHz), 100 × 10⁶ FMA/s on the scalar path.
 
 ---
 
-## **Contributions**
+## Compiler
 
-Contributions are welcome! Feel free to open issues or submit pull requests.
+[superfloat.llvm](https://github.com/aloshdenny/superfloat.llvm) is an LLVM 18
+fork (branch `my-llvm-changes`) that adds `sf16` as a builtin C type rather
+than a library typedef, so the format survives the whole pipeline:
+
+- **LLVM IR** — `sf16` as a first-class type, through `Type.h`, the AsmParser,
+  AsmWriter and `ValueTypes`.
+- **Clang frontend** — the `sf16` keyword in `TokenKinds.def`, a builtin type
+  in `BuiltinTypes.def`, plus AST, lexer, parser, `Sema` and Itanium mangling.
+- **CodeGen** — 16-bit width, 15-bit scale, lowered to `i16` with fixed-point
+  intrinsics for the arithmetic.
+- **Target** — RISC-V, matching Atreides' modded RV32 control path.
+
+```c
+sf16 literal_test() {
+    sf16 x = 0.5;
+    return x;
+}
+```
 
 ---
 
-## **Sponsors**
+## Repository layout
 
-We would like to thank our sponsors for their support:
+```
+benchmarks/         SFx training and evaluation suite (see benchmarks/README.md)
+  superfloat.py       SFx grid, bounded STE, layer surgery, clamping
+  train_eurosat.py    ConvNeXt-Tiny classification
+  train_yolo.py       YOLO detection via Ultralytics callbacks
+  train_vjepa_*.py    V-JEPA 2 PTQ probe and end-to-end QAT
+  test_superfloat.py  correctness tests (run these first)
+  make_figures.py     all paper figures, one uniform style
+  modal/              Modal apps for the cloud sweeps
+cifar_modular/      ResNet CIFAR training used for the paper's CIFAR tables
+src/
+  modal/              GPT-2/GPT-3 pretraining under clamped matmul
+  test/               matrix/stream generators for hardware testbenches
+  verilog/            early FPGA functional units (superseded by superfloat.gpu)
+Q115 layer story.py Layer-by-layer Q1.15 vs FP32 signal analysis on ResNet-20
+assets/results/     weight-distribution studies and architecture figures
+docs/paper/         TPAMI manuscript, anonymized main document and title page
+```
+
+## Usage
+
+```bash
+git clone https://github.com/aloshdenny/superfloat
+cd superfloat/benchmarks
+
+python test_superfloat.py                       # verify the quantizer first
+python train_eurosat.py --format sf8 --seed 0   # classification
+python train_yolo.py --format sf8 --cfg yolo11x.yaml --data VisDrone.yaml \
+    --init pretrained --imgsz 640 --batch 8     # detection
+```
+
+Cloud sweeps run on Modal. Deployed apps must be spawned by name — `modal run`
+creates an *ephemeral* app that stops when its entrypoint returns, cancelling
+every job it spawned:
+
+```bash
+modal deploy modal/modal_sweep.py
+```
+
+```python
+import modal
+modal.Function.from_name("superfloat-sweep", "train_baseline").spawn("visdrone_pretrained_sf16")
+```
+
+---
+
+## Contributions
+
+Contributions are welcome. Feel free to open issues or submit pull requests.
+
+## Sponsors
 
 <div style="display: flex; justify-content: space-between;">
   <img src="https://pbs.twimg.com/profile_images/1848649662825406464/NFqR2OSK_400x400.jpg" width="200"/>
@@ -365,8 +320,6 @@ We would like to thank our sponsors for their support:
   <img src="https://styles.redditmedia.com/t5_bxucfi/styles/profileIcon_xjiodpqbkvbd1.jpg?width=256&height=256&frame=1&auto=webp&crop=256:256,smart&s=bda66bfc6dae1682cf1e5351a48ae8e473e12203" width="200">
 </div>
 
----
-
-## **License**
+## License
 
 This project is licensed under the MIT License.
