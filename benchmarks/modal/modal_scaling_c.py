@@ -109,16 +109,58 @@ def dead_fraction(model):
     gradient signal to recover from.
     """
     import torch
-    from superfloat import SFConv2d, SFLinear
+    from superfloat import SFConv2d, SFLinear, sf_quantize_sv
     tot = zero = 0
     with torch.no_grad():
         for m in model.modules():
-            if isinstance(m, (SFConv2d, SFLinear)):
-                from superfloat import sf_quantize_sv
-                q = sf_quantize_sv(m.weight, m.sf_scale, m.sf_vmax)
-                zero += (q == 0).sum().item()
-                tot += q.numel()
+            if not isinstance(m, (SFConv2d, SFLinear)):
+                continue
+            w = m.weight
+            # must mirror the forward: under channel normalisation the grid
+            # sees w/s_c, so quantizing the raw tensor would report the
+            # un-normalised dead fraction and hide the effect being measured
+            if type(m).__name__ == "SFConv2dNorm":
+                w = w / w.abs().amax(dim=(1, 2, 3), keepdim=True).clamp_min(1e-8)
+            q = sf_quantize_sv(w, m.sf_scale, m.sf_vmax)
+            zero += (q == 0).sum().item()
+            tot += q.numel()
     return zero / max(tot, 1)
+
+
+
+def install_channel_norm(model, bits):
+    """Per-output-channel weight normalisation before SF quantization.
+
+    The deployed weight is exactly an SF grid value: the conv arithmetic never
+    multiplies by a scale. s_c only decides *which* grid point each weight
+    lands on, and the BatchNorm that follows every conv is invariant to
+    per-output-channel scaling of its input, so s_c is absorbed there rather
+    than being carried into inference. That satisfies SF-only hardware, where
+    registers and the systolic array compute solely in SF range.
+
+    This is the fix for the collapse tier C measured: at SF4 with Kaiming init,
+    99.98% of conv weights fall below the grid's zero-threshold, because the
+    weights are ~50x smaller than the grid step. Dividing by max|w_c| puts them
+    across the full [-1, 1] grid instead.
+    """
+    import torch
+    from superfloat import SFConv2d, sf_quantize_sv
+
+    class SFConv2dNorm(SFConv2d):
+        def forward(self, x):
+            w = self.weight
+            s = w.abs().amax(dim=(1, 2, 3), keepdim=True).clamp_min(1e-8)
+            wq = sf_quantize_sv(w / s, self.sf_scale, self.sf_vmax)
+            b = None if self.bias is None else sf_quantize_sv(
+                self.bias, self.sf_scale, self.sf_vmax)
+            return self._conv_forward(x, wq, b)
+
+    n = 0
+    for m in model.modules():
+        if isinstance(m, SFConv2d) and not isinstance(m, SFConv2dNorm):
+            m.__class__ = SFConv2dNorm
+            n += 1
+    return n
 
 
 # ------------------------------------------------------------------- data ---
@@ -203,7 +245,8 @@ def _augment(xb):
 @app.function(image=image, gpu=GPU, volumes={"/vol": vol},
               timeout=60 * 60 * 3, max_containers=10)
 def train(width_mult: float, bits: int, seed: int, epochs: int = EPOCHS,
-          lr: float = 1e-3, batch: int = 128, quantize_head: bool = False):
+          lr: float = 1e-3, batch: int = 128, quantize_head: bool = False,
+          channel_norm: bool = False):
     """One (width, precision, seed) point.
 
     quantize_head exists as a control. With the head excluded (the default,
@@ -223,7 +266,9 @@ def train(width_mult: float, bits: int, seed: int, epochs: int = EPOCHS,
 
     disable_tf32()
     torch.manual_seed(seed)
-    tag = f"w{width_mult}_sf{bits}_s{seed}" + ("_qhead" if quantize_head else "")
+    tag = (f"w{width_mult}_sf{bits}_s{seed}"
+           + ("_qhead" if quantize_head else "")
+           + ("_cnorm" if channel_norm else ""))
     os.makedirs(OUT, exist_ok=True)
 
     xtr, ytr = _load_gpu(True)
@@ -235,6 +280,8 @@ def train(width_mult: float, bits: int, seed: int, epochs: int = EPOCHS,
     nconv = apply_superfloat(model, bits=bits,
                              head_names=() if quantize_head else ("head",),
                              quantize_activations=False)
+    if channel_norm:
+        install_channel_norm(model, bits)
     nparams = sum(p.numel() for p in model.parameters())
     d0 = dead_fraction(model)
 
@@ -270,7 +317,8 @@ def train(width_mult: float, bits: int, seed: int, epochs: int = EPOCHS,
             loss.backward()
             opt.step()
             sched.step()
-            clamp_all(model)
+            if not channel_norm:
+                clamp_all(model)
             tl += loss.item() * len(idx)
             n += len(idx)
 
@@ -296,7 +344,7 @@ def train(width_mult: float, bits: int, seed: int, epochs: int = EPOCHS,
     qp = sum(p.numel() for mod in model.modules()
              if isinstance(mod, (SFConv2d, SFLinear)) for p in mod.parameters())
     rec = {"width_mult": width_mult, "bits": bits, "seed": seed,
-           "quantize_head": quantize_head,
+           "quantize_head": quantize_head, "channel_norm": channel_norm,
            "quantized_frac": qp / nparams,
            "params": nparams, "fan_in": fan_in, "sigma": sigma,
            "p_star_pred": p_star, "dead_at_init": d0,

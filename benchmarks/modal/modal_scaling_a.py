@@ -183,8 +183,9 @@ def nonembed_params(model):
 
 @app.function(image=image, gpu=GPU, volumes={"/vol": vol},
               timeout=60 * 60 * 12, max_containers=7)
-def train(size: str, bits: int, batch: int = 16, lr: float = 6e-4):
-    """One (N, p) point. bits=0 is the FP32 control."""
+def train(size: str, bits: int, batch: int = 16, lr: float = 6e-4,
+          seed: int = 0):
+    """One (N, p, seed) point. bits=0 is the FP32 control."""
     import json
     import math
     import os
@@ -196,9 +197,10 @@ def train(size: str, bits: int, batch: int = 16, lr: float = 6e-4):
     from superfloat import disable_tf32, apply_superfloat, clamp_all
 
     disable_tf32()
-    torch.manual_seed(0)
+    torch.manual_seed(seed)
     d_model, n_layer, n_head = CONFIGS[size]
-    tag = f"{size}_" + ("fp32" if bits == 0 else f"sf{bits}")
+    tag = (f"{size}_" + ("fp32" if bits == 0 else f"sf{bits}")
+           + (f"_s{seed}" if seed else ""))
     os.makedirs(OUT, exist_ok=True)
 
     model = build_gpt(d_model, n_layer, n_head).cuda()
@@ -236,7 +238,7 @@ def train(size: str, bits: int, batch: int = 16, lr: float = 6e-4):
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=lr, total_steps=steps, pct_start=0.02)
     lossf = torch.nn.CrossEntropyLoss()
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(seed)
 
     def batch_from(lo, hi):
         ix = rng.integers(lo, hi - SEQLEN - 1, size=batch)
@@ -271,7 +273,7 @@ def train(size: str, bits: int, batch: int = 16, lr: float = 6e-4):
             print(f"[{tag}] step {step}/{steps} train={loss.item():.4f} "
                   f"val={vl/k:.4f} ({(time.time()-t0)/60:.0f} min)", flush=True)
 
-    rec = {"size": size, "bits": bits, "n_nonembed": n_ne,
+    rec = {"size": size, "bits": bits, "seed": seed, "n_nonembed": n_ne,
            "tokens": total_tokens, "steps": steps,
            "final_val_loss": hist[-1]["val_loss"],
            "minutes": (time.time() - t0) / 60, "history": hist}
