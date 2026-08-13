@@ -63,6 +63,10 @@ def load_c(results_dir):
         # smoke runs share tags with real ones; length is the only honest check
         if len(r.get("history", [])) < MIN_EPOCHS:
             continue
+        # head-quantization controls are a different condition and must not be
+        # pooled into the main fit
+        if r.get("quantize_head"):
+            continue
         by[(r["width_mult"], r["bits"])].append(r)
     return by
 
@@ -148,6 +152,124 @@ def figure(by, fits, slope, intercept, se, outdir):
     return path
 
 
+
+# ------------------------------------------------------- tiers A and B -----
+def load_ab(results_dir, tier):
+    """Tier A (QAT) or B (PTQ) records. bits=0 is that row's control."""
+    out = []
+    for f in glob.glob(os.path.join(results_dir, f"runs_scaling_{tier}", "*.json")):
+        if "_fp16head" in f:          # coverage control, not part of the sweep
+            continue
+        out.append(json.load(open(f)))
+    return out
+
+
+def _penalty_table(rows, key_size, key_loss, step=None):
+    """size -> {bits: penalty vs that size's own control}."""
+    grp = collections.defaultdict(dict)
+    for r in rows:
+        if step is not None and r.get("step", 0) != step:
+            continue
+        grp[r[key_size]][r["bits"]] = r[key_loss]
+    out = {}
+    for size, d in grp.items():
+        if 0 not in d:
+            continue
+        out[size] = {b: v - d[0] for b, v in d.items() if b}
+    return out, {s: d[0] for s, d in grp.items() if 0 in d}
+
+
+# a loss far above the uniform baseline is a diverged forward pass, not a
+# measurement; ln(50304) = 10.83 for this vocabulary
+RANDOM_LOSS = math.log(50304)
+DIVERGED = RANDOM_LOSS * 1.2
+
+
+def figure_ab(results_dir, outdir):
+    a = load_ab(results_dir, "a")
+    b = load_ab(results_dir, "b")
+    if not a and not b:
+        return None
+    fig, axes = plt.subplots(1, 3, figsize=(19.5, 4.8))
+
+    # (a) QAT
+    pen_a, ctrl_a = _penalty_table(a, "size", "final_val_loss")
+    order_a = sorted(pen_a, key=lambda s: next(
+        r["n_nonembed"] for r in a if r["size"] == s))
+    for i, s in enumerate(order_a):
+        n = next(r["n_nonembed"] for r in a if r["size"] == s)
+        xs = sorted(pen_a[s])
+        axes[0].plot(xs, [pen_a[s][x] for x in xs], marker="o", ms=4, lw=1.7,
+                     color=WIDTH_COLOR[i % len(WIDTH_COLOR)],
+                     label=f"{s} ({n/1e6:.0f}M non-emb)")
+    axes[0].axhline(0, color="k", lw=0.8, ls=":")
+    axes[0].set_yscale("symlog", linthresh=0.01)
+    axes[0].set_xlabel("SuperFloat precision p (bits)")
+    axes[0].set_ylabel("val loss penalty vs FP32 (nats)")
+    axes[0].set_title("(a) QAT from scratch: cost grows with N below SF6")
+    axes[0].legend(fontsize=8)
+    axes[0].grid(alpha=0.3)
+
+    # (b) PTQ, N axis
+    pen_b, ctrl_b = _penalty_table(b, "size", "val_loss", step=0)
+    order_b = [s for s in ["70m", "160m", "410m", "1b", "1.4b", "2.8b",
+                           "6.9b", "12b"] if s in pen_b]
+    cmap = plt.get_cmap("viridis")
+    for i, s in enumerate(order_b):
+        xs = sorted(pen_b[s])
+        ys = [min(pen_b[s][x], 20) for x in xs]
+        axes[1].plot(xs, ys, marker="o", ms=4, lw=1.7,
+                     color=cmap(i / max(len(order_b) - 1, 1)), label=s)
+    axes[1].axhline(0, color="k", lw=0.8, ls=":")
+    axes[1].set_yscale("symlog", linthresh=0.01)
+    axes[1].set_xlabel("SuperFloat precision p (bits)")
+    axes[1].set_ylabel("val loss penalty vs FP16 (nats)")
+    axes[1].set_title("(b) PTQ across the Pythia ladder: threshold at SF8")
+    axes[1].legend(fontsize=8, ncol=2)
+    axes[1].grid(alpha=0.3)
+
+    # (c) D axis -- the same model, more tokens
+    ck = collections.defaultdict(dict)
+    for r in b:
+        if r.get("step"):
+            ck[(r["size"], r["step"])][r["bits"]] = r["val_loss"]
+    sizes = sorted({s for s, _ in ck})
+    for i, size in enumerate(sizes):
+        steps = sorted({st for sz, st in ck if sz == size})
+        xs, ys = [], []
+        for st in steps:
+            v = ck[(size, st)]
+            if 0 in v and 6 in v:
+                xs.append(st * 2097152 / 1e9)
+                ys.append(v[6] - v[0])
+        if xs:
+            axes[2].plot(xs, ys, marker="o", ms=5, lw=1.8,
+                         color=WIDTH_COLOR[i % len(WIDTH_COLOR)], label=size)
+    axes[2].set_xlabel("training tokens (B)")
+    axes[2].set_ylabel("SF6 penalty vs FP16 (nats)")
+    axes[2].set_title("(c) PTQ damage grows with training tokens")
+    axes[2].legend(fontsize=8)
+    axes[2].grid(alpha=0.3)
+
+    fig.tight_layout()
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, "scaling_qat_vs_ptq.png")
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+    # report cells that diverged rather than degraded
+    bad = sorted({(r["size"], r["bits"], r.get("step", 0), round(r["val_loss"], 1))
+                  for r in b if r.get("bits") and r["val_loss"] > DIVERGED})
+    if bad:
+        print(f"\n  {len(bad)} PTQ cells exceeded {DIVERGED:.1f} nats "
+              f"(uniform = {RANDOM_LOSS:.2f}); these are diverged forward "
+              "passes, not losses:")
+        for s_, bits, st, v in bad[:8]:
+            tag = f"@step{st}" if st else ""
+            print(f"     {s_:<6} SF{bits:<3}{tag:<12} loss={v:.1f}")
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-dir", default=".")
@@ -177,6 +299,9 @@ def main():
           "so the logistic is a fitted shape, not a derived one")
 
     print("\n  " + figure(by, fits, slope, intercept, se, args.out))
+    p = figure_ab(args.results_dir, args.out)
+    if p:
+        print("  " + p)
 
 
 if __name__ == "__main__":

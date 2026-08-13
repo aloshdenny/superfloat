@@ -100,8 +100,18 @@ def prepare_eval():
 
 @app.function(image=image, gpu=GPU, volumes={"/vol": vol},
               timeout=60 * 60 * 2, max_containers=8)
-def evaluate(size: str, bits: int, step: int = 0, batch: int = 4):
-    """Weight-only SFx PTQ, then held-out cross-entropy."""
+def evaluate(size: str, bits: int, step: int = 0, batch: int = 4,
+             quantize_head: bool = True):
+    """Weight-only SFx PTQ, then held-out cross-entropy.
+
+    quantize_head controls whether Pythia's untied LM head (embed_out) is
+    quantized along with the transformer stack. It must default to True for
+    the scaling arm: embed_out is 37% of pythia-70m but only 2% of pythia-12b,
+    so leaving it in fp16 would mean small models are largely unquantized and
+    large ones almost fully quantized. Degradation would then appear to grow
+    with N purely as a coverage artefact -- which is the very claim this tier
+    exists to test independently.
+    """
     import json
     import os
     import sys
@@ -114,7 +124,8 @@ def evaluate(size: str, bits: int, step: int = 0, batch: int = 4):
     disable_tf32()
     model_id = f"EleutherAI/pythia-{size}"
     revision = f"step{step}" if step else "main"
-    tag = f"{size}_sf{bits}" + (f"_step{step}" if step else "")
+    tag = (f"{size}_sf{bits}" + (f"_step{step}" if step else "")
+           + ("" if quantize_head else "_fp16head"))
     os.makedirs(OUT, exist_ok=True)
 
     from transformers import AutoModelForCausalLM
@@ -128,10 +139,22 @@ def evaluate(size: str, bits: int, step: int = 0, batch: int = 4):
     if bits:
         scale, vmax = sf_params(bits)
         with torch.no_grad():
+            # transformers renamed GPTNeoX's head embed_out -> lm_head between
+            # 5.6 and 5.15, so match both; a bare "embed_out" test silently
+            # matches nothing on the newer runtime and quantizes the head
+            # regardless of the flag.
+            HEAD = ("embed_out", "lm_head")
+            heads = [n for n, m in model.named_modules()
+                     if isinstance(m, torch.nn.Linear)
+                     and n.rsplit(".", 1)[-1] in HEAD]
+            if len(heads) != 1:
+                raise RuntimeError(
+                    f"expected exactly one head module, found {heads}; "
+                    "head handling would be silently wrong")
             for name, m in model.named_modules():
-                # the tied embedding/output head stays in fp16, matching the
-                # recipe used everywhere else in this project
-                if not isinstance(m, torch.nn.Linear) or "embed_out" in name:
+                if not isinstance(m, torch.nn.Linear):
+                    continue
+                if not quantize_head and name in heads:
                     continue
                 q = sf_quantize_sv(m.weight.data.float(), scale, vmax)
                 dead += (q == 0).sum().item()
@@ -154,7 +177,12 @@ def evaluate(size: str, bits: int, step: int = 0, batch: int = 4):
             tot_tok += ntok
     val_loss = tot_nll / tot_tok
 
+    # record coverage so the N axis can be audited rather than assumed
+    nonemb = sum(p.numel() for n, p in model.named_parameters()
+                 if "embed_in" not in n)
     rec = {"size": size, "bits": bits, "step": step,
+           "quantize_head": quantize_head,
+           "quantized_frac_nonemb": (tot / nonemb) if nonemb else 0.0,
            "params": sum(p.numel() for p in model.parameters()),
            "val_loss": val_loss, "ppl": float(np.exp(val_loss)),
            "dead_frac": dead / max(tot, 1), "load_s": load_s}
@@ -162,7 +190,8 @@ def evaluate(size: str, bits: int, step: int = 0, batch: int = 4):
         json.dump(rec, f)
     vol.commit()
     print(f"[{tag}] loss={val_loss:.4f} ppl={rec['ppl']:.2f} "
-          f"dead={rec['dead_frac']*100:.1f}%", flush=True)
+          f"dead={rec['dead_frac']*100:.1f}% "
+          f"cover={rec['quantized_frac_nonemb']*100:.1f}%", flush=True)
     return rec
 
 

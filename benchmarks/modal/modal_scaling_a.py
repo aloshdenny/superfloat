@@ -114,18 +114,44 @@ def build_gpt(d_model, n_layer, n_head):
     import torch
     import torch.nn as nn
 
+    class Attn(nn.Module):
+        """Explicit q/k/v projections.
+
+        nn.MultiheadAttention stores QKV as a single raw Parameter
+        (in_proj_weight), not an nn.Linear, so apply_superfloat cannot see it
+        and 25% of every block would silently stay FP32 -- which would mean
+        "SF4" did not actually denote SF4. Separate nn.Linear layers keep the
+        whole block inside the format.
+        """
+
+        def __init__(self):
+            super().__init__()
+            self.q = nn.Linear(d_model, d_model)
+            self.k = nn.Linear(d_model, d_model)
+            self.v = nn.Linear(d_model, d_model)
+            self.proj = nn.Linear(d_model, d_model)
+
+        def forward(self, x):
+            import torch.nn.functional as F
+            B, T, C = x.shape
+            hd = C // n_head
+            q = self.q(x).view(B, T, n_head, hd).transpose(1, 2)
+            k = self.k(x).view(B, T, n_head, hd).transpose(1, 2)
+            v = self.v(x).view(B, T, n_head, hd).transpose(1, 2)
+            o = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            return self.proj(o.transpose(1, 2).reshape(B, T, C))
+
     class Block(nn.Module):
         def __init__(self):
             super().__init__()
             self.ln1 = nn.LayerNorm(d_model)
-            self.attn = nn.MultiheadAttention(d_model, n_head, batch_first=True)
+            self.attn = Attn()
             self.ln2 = nn.LayerNorm(d_model)
             self.mlp = nn.Sequential(nn.Linear(d_model, 4 * d_model), nn.GELU(),
                                      nn.Linear(4 * d_model, d_model))
 
-        def forward(self, x, mask):
-            h = self.ln1(x)
-            x = x + self.attn(h, h, h, attn_mask=mask, need_weights=False)[0]
+        def forward(self, x):
+            x = x + self.attn(self.ln1(x))
             return x + self.mlp(self.ln2(x))
 
     class GPT(nn.Module):
@@ -142,10 +168,8 @@ def build_gpt(d_model, n_layer, n_head):
             b, t = idx.shape
             pos = torch.arange(t, device=idx.device)
             x = self.wte(idx) + self.wpe(pos)
-            mask = torch.triu(torch.ones(t, t, device=idx.device,
-                                         dtype=torch.bool), 1)
             for blk in self.blocks:
-                x = blk(x, mask)
+                x = blk(x)
             return self.head(self.lnf(x))
 
     return GPT()
@@ -189,6 +213,12 @@ def train(size: str, bits: int, batch: int = 16, lr: float = 6e-4):
 
     total_tokens = int(n_ne * TOKENS_PER_PARAM)
     steps = total_tokens // (batch * SEQLEN)
+    if bits:
+        expected = 6 * n_layer          # q,k,v,proj + 2 mlp per block
+        if nconv != expected:
+            raise RuntimeError(
+                f"quantized {nconv} layers, expected {expected}; "
+                "some weights would silently stay FP32")
     print(f"[{tag}] non-embed N={n_ne/1e6:.1f}M sf_layers={nconv} "
           f"D={total_tokens/1e6:.0f}M tokens steps={steps}", flush=True)
 

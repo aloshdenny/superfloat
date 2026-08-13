@@ -203,7 +203,16 @@ def _augment(xb):
 @app.function(image=image, gpu=GPU, volumes={"/vol": vol},
               timeout=60 * 60 * 3, max_containers=10)
 def train(width_mult: float, bits: int, seed: int, epochs: int = EPOCHS,
-          lr: float = 1e-3, batch: int = 128):
+          lr: float = 1e-3, batch: int = 128, quantize_head: bool = False):
+    """One (width, precision, seed) point.
+
+    quantize_head exists as a control. With the head excluded (the default,
+    matching this project's recipe) the unquantized share falls from 8.9% at
+    x0.25 to 0.6% at x4.0, so narrow models keep more full-precision capacity
+    and their p0 reads low -- which inflates the measured slope. Re-running the
+    extremes with the head quantized bounds that artefact empirically instead
+    of leaving it as an argument.
+    """
     import json
     import os
     import sys
@@ -214,7 +223,7 @@ def train(width_mult: float, bits: int, seed: int, epochs: int = EPOCHS,
 
     disable_tf32()
     torch.manual_seed(seed)
-    tag = f"w{width_mult}_sf{bits}_s{seed}"
+    tag = f"w{width_mult}_sf{bits}_s{seed}" + ("_qhead" if quantize_head else "")
     os.makedirs(OUT, exist_ok=True)
 
     xtr, ytr = _load_gpu(True)
@@ -223,7 +232,8 @@ def train(width_mult: float, bits: int, seed: int, epochs: int = EPOCHS,
     std = torch.tensor(STD, device="cuda").view(1, 3, 1, 1)
 
     model = build_resnet(width_mult).cuda()
-    nconv = apply_superfloat(model, bits=bits, head_names=("head",),
+    nconv = apply_superfloat(model, bits=bits,
+                             head_names=() if quantize_head else ("head",),
                              quantize_activations=False)
     nparams = sum(p.numel() for p in model.parameters())
     d0 = dead_fraction(model)
@@ -282,7 +292,12 @@ def train(width_mult: float, bits: int, seed: int, epochs: int = EPOCHS,
             print(f"[{tag}] ep{ep} train={tl/n:.3f} val={vl/m:.3f} "
                   f"acc={acc:.2f} dead={hist[-1]['dead']*100:.1f}%", flush=True)
 
+    from superfloat import SFConv2d, SFLinear
+    qp = sum(p.numel() for mod in model.modules()
+             if isinstance(mod, (SFConv2d, SFLinear)) for p in mod.parameters())
     rec = {"width_mult": width_mult, "bits": bits, "seed": seed,
+           "quantize_head": quantize_head,
+           "quantized_frac": qp / nparams,
            "params": nparams, "fan_in": fan_in, "sigma": sigma,
            "p_star_pred": p_star, "dead_at_init": d0,
            "best_acc": best, "final_acc": hist[-1]["val_acc"],
