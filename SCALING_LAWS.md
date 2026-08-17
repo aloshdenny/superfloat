@@ -1,14 +1,14 @@
 # SuperFloat precision scaling study
 
 How far SuperFloat can be pushed, measured rather than argued, across four
-experiment tiers and 500 runs.
+experiment tiers and 509 runs.
 
 | tier | question | substrate | runs |
 | --- | --- | --- | --- |
-| A | how does QAT cost scale with model size? | GPT, 4.7M-85M non-embedding params, FineWeb-Edu | 34 |
+| A | how does QAT cost scale with model size? | GPT, 4.7M-85M non-embedding params, FineWeb-Edu | 35 |
 | B | how does PTQ cost scale with size *and* data? | Pythia 70M-12B, incl. intermediate checkpoints | 172 |
 | C | where does a network stop training, and why? | ResNet-20, width x0.25-x4, CIFAR-100 | 258 |
-| D | can the tier C fix be carried to transformers? | GPT 4.7M / 10.6M, three block designs | 36 |
+| D | can the tier C fix be carried to transformers? | GPT 4.7M / 10.6M, three block designs | 44 |
 
 Everything below is weights-only quantization with an FP32/FP16 head, and every
 penalty is measured against a control trained in the **same** condition. That
@@ -146,13 +146,29 @@ there is no trend at all (SF5: R2 = 0.002). So it is specifically the
 Seed replication at 25m (3 seeds) confirms both the effect and that the small
 negative penalties are noise:
 
-| | mean penalty | seed spread |
+| 25m | mean penalty | seed spread |
 | --- | --- | --- |
 | SF4 | +1.598 | 0.069 |
 | SF5 | +0.344 | 0.052 |
 | SF6 | -0.029 | 0.052 |
 
 SF6 is indistinguishable from zero. SF5 at 25m genuinely costs 0.344 nats.
+
+**The 85m SF5 point is not an outlier.** A second seed gives 3.8762 against
+seed 0's 3.8612, i.e. a mean penalty of **+0.030 with a spread of 0.015** --
+smaller than the eval noise itself (0.032 nats, taken as the std of the last
+five evaluations within a run). So SF5 is free at 85m and costs 0.344 nats at
+25m, both measured over multiple seeds. The non-monotonicity in N is real:
+
+| size | SF5 penalty | seeds |
+| --- | --- | --- |
+| 5m | +0.024 | 1 |
+| 11m | +0.168 | 1 |
+| 25m | **+0.344** | 3 (spread 0.052) |
+| 85m | **+0.030** | 2 (spread 0.015, at the noise floor) |
+
+We have no mechanism for it. It is reported because it replicates, not because
+it is understood.
 
 ### 3.2 PTQ needs two more bits than QAT
 
@@ -246,12 +262,31 @@ sizes, with inference arithmetic unchanged.
 
 ![absorption](benchmarks/figures/scaling_d_absorption.png)
 
-Two things not to over-read. `ln_full`'s FP32 control is 0.165 (5m) and 0.247
-(11m) nats better than `none`'s -- the extra norms help independently of
-quantization, which is why per-mode controls are load-bearing here. And the
-non-monotonicities within a mode (11m `ln` has SF2 better than SF4) sit at
-~0.1 nats against a ~0.05 nat seed spread; these are single-seed runs and the
-ordering between adjacent precisions is not resolvable.
+`ln_full`'s FP32 control is 0.165 (5m) and 0.247 (11m) nats better than
+`none`'s -- the extra norms help independently of quantization, which is why
+per-mode controls are load-bearing here.
+
+### 4.1 Under scale absorption, coarser grids do better
+
+The ordering within `ln` at 11m inverts, and three seeds show it is not noise:
+
+| | seed 0 | seed 1 | seed 2 | mean penalty | spread |
+| --- | --- | --- | --- | --- | --- |
+| SF2 | 6.4204 | 6.4265 | 6.4527 | **+0.108** | 0.013 |
+| SF3 | 6.4921 | 6.4552 | 6.4847 | **+0.152** | 0.047 |
+| SF4 | 6.5167 | 6.5057 | 6.5153 | **+0.187** | 0.024 |
+
+Fewer bits is consistently better, in every seed, with a SF2-to-SF4 gap of
+0.079 nats against a worst-case spread of 0.047.
+
+Read this narrowly. All three remain *above* their FP32 control, so this is
+not ternary beating full precision; it is that among quantized options under
+scale absorption, the coarsest grid lands closest to FP32. The natural
+explanation is regularisation -- an 11m model on 106M tokens is
+over-parameterised for its budget, and a coarser grid constrains it harder --
+and it is consistent with SF2 being exactly ternary, the BitNet operating
+point. But this is one architecture at one size, so it is a measured effect
+with a hypothesis attached, not a mechanism.
 
 ---
 
@@ -261,11 +296,12 @@ ordering between adjacent precisions is not resolvable.
   is not. The integer precision grid cannot resolve p0 differences below ~1 bit,
   and the slope drifts with fitting range. A continuously-scaled grid would fix
   this.
-- **85m SF5.** Penalties run +0.024, +0.168, +0.344 (3 seeds), then +0.022 at
-  85m. With 25m confirmed over three seeds, 85m is the odd point, and its
-  replication was cut off by budget. Left open rather than extrapolated.
-- **Tier A has one seed per config** except the 25m replication, so small
-  negative penalties there are not distinguishable from noise.
+- **Tier A has one seed per config** except the 25m and 85m-SF5 replications,
+  so small negative penalties elsewhere are not distinguishable from noise.
+- **The SF5 non-monotonicity in N is unexplained.** It replicates (see 3.1) but
+  no mechanism is offered.
+- **The inverted precision ordering under scale absorption** (4.1) is measured
+  at one architecture and one size.
 - **PTQ under scale absorption** was never run. Given SF4 PTQ destroys every
   model tested, it is the obvious next experiment.
 - **Activation quantization** is out of scope throughout; the V-JEPA
