@@ -1,7 +1,8 @@
 # SuperFloat precision scaling study
 
 How far SuperFloat can be pushed, measured rather than argued, across four
-experiment tiers and 509 runs.
+experiment tiers and seven follow-ups. 866 runs are archived under
+`benchmarks/results`, and every figure in this document regenerates from them.
 
 | tier | question | substrate | runs |
 | --- | --- | --- | --- |
@@ -9,6 +10,19 @@ experiment tiers and 509 runs.
 | B | how does PTQ cost scale with size *and* data? | Pythia 70M-12B, incl. intermediate checkpoints | 172 |
 | C | where does a network stop training, and why? | ResNet-20, width x0.25-x4, CIFAR-100 | 258 |
 | D | can the tier C fix be carried to transformers? | GPT 4.7M / 10.6M, three block designs | 44 |
+
+Seven follow-ups then ask where the precision that the tiers did not explain
+actually goes (section 5):
+
+| # | question | substrate | runs |
+| --- | --- | --- | --- |
+| 1 | how do weight and activation precision trade off? | ResNet-20, CIFAR-100 | 42 |
+| 2 | how does PTQ damage move with training tokens? | Pythia 160M-1.4B, 7 checkpoints | 168 |
+| 3 | does the penalty change with tokens-per-parameter? | GPT 4.7M, scale absorption | 20 |
+| 4 | does depth move the critical precision? | ResNet-20 to 56, CIFAR-100 | 48 |
+| 5 | where do dead weights sit, layer by layer? | ResNet-20 at init | 4 |
+| 6 | does usable step size track grid resolution? | ResNet-20, 10 learning rates | 60 |
+| 7 | does the paper's ResNet-56 instability reproduce? | ResNet-20 to 56, plain SF | 24 |
 
 Everything below is weights-only quantization with an FP32/FP16 head, and every
 penalty is measured against a control trained in the **same** condition. That
@@ -37,6 +51,27 @@ that never enters the inference arithmetic, and the floor drops by 2-4 bits.
 Both fixes keep the matmul holding exact SF grid values. The scale lives in the
 normalisation layer, which on Atreides sits outside the systolic array, so
 registers and the MAC array still compute only in SF range.
+
+Four further results from the follow-ups, each measured against a control in
+the same condition:
+
+- **The two operands are not symmetric.** Weights saturate at SF3-SF4;
+  activations need SF6, and below that the weight precision stops mattering.
+  The activation scale folds into the preceding norm, so both operands still
+  reach the array as exact SF values. A datapath that gives both operands the
+  same width is misallocating. (5.1)
+- **Precision and learning rate are independent.** Nothing diverged in 60
+  cells across a 640x range of step size, and the optimum is 4e-3 from SF4 to
+  SF16 alike. An FP32 recipe transfers without a learning-rate search. (5.3)
+- **PTQ damage is U-shaped in training tokens**, not monotone: both ends of a
+  run are fragile and the middle is not. Over-training a 160M model to 300B
+  tokens costs 2.5 bits of deployable precision. (3.3, 5.4)
+- **Depth does not move the critical precision**, it lowers the penalty. Width
+  raises the requirement; depth makes the precision you have go further. (5.5)
+
+One prior number does not survive. The paper's 12.0-point seed spread for SF16
+on ResNet-56 measures 0.94 points here across three seeds in the same plain
+condition, and no cell in 72 runs exceeds 1.08. (5.6)
 
 ---
 
@@ -342,6 +377,14 @@ The ordering within `ln` at 11m inverts, and three seeds show it is not noise:
 Fewer bits is consistently better, in every seed, with a SF2-to-SF4 gap of
 0.079 nats against a worst-case spread of 0.047.
 
+**These three rows are the one result here that does not regenerate from the
+archive.** The seed replicates were run on ephemeral capacity and their records
+were never written back, so `scaling_d.jsonl` holds the 36-run base grid and
+not the six extra seeds. The numbers above are as originally reported; they are
+simply no longer backed by retained data, and should be treated as weaker than
+everything else in this document until re-run. Section 5.4 does not repair
+this, since it runs at 5M where no inversion exists.
+
 Read this narrowly. All three remain *above* their FP32 control, so this is
 not ternary beating full precision; it is that among quantized options under
 scale absorption, the coarsest grid lands closest to FP32. The natural
@@ -534,6 +577,76 @@ the seed spread reported elsewhere, so it is recorded rather than claimed.
 
 ![regularisation](benchmarks/figures/lab_exp3_regularisation.png)
 
+### 5.5 Depth does not move the critical precision; it lowers the penalty
+
+Tier C varied width and found the precision requirement rising with it. Depth
+was never varied. Under channel normalisation, six precisions crossed with four
+ResNet depths, two seeds each, mean best top-1:
+
+| depth | SF2 | SF3 | SF4 | SF6 | SF8 | SF16 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 20 | 58.54 | 62.03 | 62.58 | 62.96 | 62.89 | 62.77 |
+| 32 | 61.67 | 63.94 | 64.54 | 64.59 | 65.03 | 64.75 |
+| 44 | 63.88 | 65.44 | 66.29 | 65.98 | 66.26 | 65.97 |
+| 56 | 64.33 | 66.12 | 66.33 | 66.48 | 66.52 | 66.25 |
+
+The shape of every row is the same: a step from SF2 to SF3, then flat. No knee
+moves. Where depth does show up is in the size of the penalty, which shrinks
+steadily as the network deepens:
+
+| penalty vs SF16 | ResNet-20 | ResNet-32 | ResNet-44 | ResNet-56 |
+| --- | --- | --- | --- | --- |
+| SF2 | 4.23 | 3.08 | 2.09 | **1.92** |
+| SF3 | 0.74 | 0.81 | 0.53 | **0.13** |
+
+This is what 5.2 predicts. Depth adds layers but does not change any layer's
+fan_in, and under normalisation the dead fraction depends only on precision, so
+there is no mechanism by which depth should move the critical precision. The
+shrinking penalty is the ordinary capacity effect: a deeper network has more
+layers to absorb the same per-layer quantization noise.
+
+Width and depth are therefore not interchangeable for this purpose. Widening a
+network raises the precision it needs; deepening one does not, and makes the
+precision it has go further.
+
+![depth](benchmarks/figures/lab_exp4_depth.png)
+
+### 5.6 The reported ResNet-56 instability does not reproduce
+
+The paper reports a seed spread of 12.0 points for SF16 on ResNet-56, which is
+the single largest instability in it. Everything in 5.5 runs with channel
+normalisation, which did not exist when that number was measured, so 5.5 cannot
+speak to it. exp7 reruns the same depths in the plain condition, no per-channel
+scale, at the two precisions the spread was reported at, three seeds each:
+
+| depth | SF8 | SF16 |
+| --- | --- | --- |
+| 20 | 62.21 [0.59] | 62.32 [0.37] |
+| 32 | 64.53 [0.66] | 64.42 [0.20] |
+| 44 | 65.89 [0.69] | 65.84 [0.27] |
+| 56 | 66.39 [0.87] | 66.25 [0.94] |
+
+Brackets are the seed spread. The largest anywhere in the plain condition is
+**0.94 points**, at exactly the cell the 12.0 was reported for, whose three
+seeds land at 65.60, 66.49 and 66.54. That is thirteen times smaller than the
+reported figure. Across all 72 runs in 5.5 and 5.6 together, no cell exceeds
+1.08 points.
+
+SF8 and SF16 are also indistinguishable at every depth, which is expected:
+normalisation matters at SF2 to SF4, where the grid is coarse enough for scale
+placement to decide whether weights survive at all, and by SF8 the grid is fine
+enough that it does not matter. That is why the plain and normalised numbers
+agree here while diverging by 60 points at SF2 in tier C.
+
+**What this does and does not settle.** It says the instability is not a
+property of SF16 at depth 56 that any correct implementation must reproduce.
+It does not identify what produced the original number, because this uses the
+present training recipe rather than the paper's, so recipe and scale placement
+are not separated. The honest reading is that the 12.0 should not be relied on
+as a property of the format.
+
+![plain depth](benchmarks/figures/lab_exp7_plain_depth.png)
+
 ## 6. What is not established
 
 - **The width exponent.** +1.12 bits over 16x width is solid; a single exponent
@@ -545,7 +658,9 @@ the seed spread reported elsewhere, so it is recorded rather than claimed.
 - **The SF5 non-monotonicity in N is unexplained.** It replicates (see 3.1) but
   no mechanism is offered.
 - **The inverted precision ordering under scale absorption** (4.1) is measured
-  at one architecture and one size.
+  at one architecture and one size, and its three-seed evidence is no longer
+  backed by retained records (see 4.1). Re-running it at 11M is the single
+  highest-value open item in this study.
 - **PTQ under scale absorption** was never run. Given SF4 PTQ destroys every
   model tested, it is the obvious next experiment.
 - **Activation quantization** is out of scope for the four tiers; 5.1 measures
@@ -556,6 +671,16 @@ the seed spread reported elsewhere, so it is recorded rather than claimed.
   specific: it rests on activations being one-sided and heavy-tailed after
   ReLU, and a transformer's post-GELU and residual-stream activations are
   differently shaped. It is untested there.
+- **The ResNet-56 non-reproduction (5.6) does not explain the original
+  number.** It uses this study's training recipe, not the paper's, so recipe
+  and scale placement are not separated. It shows the instability is not a
+  property the format forces, not what produced the 12.0.
+- **exp7 covers only SF8 and SF16**, the two precisions the spread was
+  reported at. The plain-vs-normalised comparison at those precisions is
+  therefore uninformative about normalisation, which matters at SF2-SF4.
+- **The depth sweep (5.5) is two seeds per cell** against exp7's three, and one
+  cell there shows a 1.08-point spread, so differences below about a point
+  between adjacent precisions are not resolved.
 - **The learning-rate result is measured on 12-epoch runs.** Short runs are
   enough to expose divergence, which is what was being looked for, but a
   configuration that survives 12 epochs at 6e-2 could still fail over 60. The

@@ -14,11 +14,11 @@ silent bug visible, and several were caught that way.
 | --- | --- | --- | --- |
 | 1 | `exp1_act.py` | how do weight and activation precision trade off? | asymmetric: weights need 3-4 bits, activations 6 |
 | 2 | `exp2_dn.py` | how does PTQ damage move with training tokens? | U-shaped; both ends of a run are fragile |
-| 3 | `exp3_reg.py` | is low precision acting as a regulariser? | see 5.5 |
-| 4 | `exp1_act.py --depth` | does depth move the critical precision? | no |
+| 3 | `exp3_reg.py` | how does the penalty move with tokens-per-parameter? | U-shaped; decay is not the whole story |
+| 4 | `exp1_act.py --depth` | does depth move the critical precision? | no; it lowers the penalty |
 | 5 | `exp5_alloc.py` | where do dead weights sit, layer by layer? | in wide layers, exactly as fan_in predicts |
 | 6 | `exp6_lr.py` | does usable step size track grid resolution? | no, not over a 640x range |
-| 7 | `exp1_act.py --no-chan-norm --depth` | does the depth result survive without normalisation? | see 5.4 |
+| 7 | `exp1_act.py --no-chan-norm --depth` | does the paper's ResNet-56 instability reproduce? | no: 0.94 pp against 12.0 |
 
 ## Running
 

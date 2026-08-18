@@ -109,8 +109,19 @@ def load_gpu(train):
     # concurrent streams that is a synchronised GPU-idle window at each config
     # start. Fetch once if missing, then never re-check.
     import os as _os
-    have = _os.path.isdir(_os.path.join(DATA, "cifar-100-python"))
-    ds = torchvision.datasets.CIFAR100(DATA, train=train, download=not have)
+    # The directory appears the moment the tarball starts extracting, so an
+    # isdir() check lets a concurrently starting stream open a half-written
+    # dataset and die with "Dataset not found or corrupted". Look for the
+    # extracted files instead, and if the check still loses the race, wait for
+    # the download that is already in flight rather than starting a second one.
+    base = _os.path.join(DATA, "cifar-100-python")
+    have = all(_os.path.isfile(_os.path.join(base, f))
+               for f in ("train", "test", "meta"))
+    try:
+        ds = torchvision.datasets.CIFAR100(DATA, train=train, download=not have)
+    except RuntimeError:
+        time.sleep(90)
+        ds = torchvision.datasets.CIFAR100(DATA, train=train, download=True)
     x = torch.from_numpy(np.asarray(ds.data)).permute(0, 3, 1, 2).contiguous()
     return x.cuda(), torch.tensor(ds.targets, dtype=torch.long).cuda()
 

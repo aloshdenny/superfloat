@@ -345,11 +345,14 @@ def fig_plain(rows4, rows7, out):
             ax[1].plot(xs, [np.ptp(g[(d, b)]) for d in xs], marker="o", ms=5,
                        lw=1.8, ls=ls, color=C[i % len(C)], label=f"SF{b}, {lab}")
     ax[1].axhline(12.0, color="#d62728", lw=1.6, ls=":")
-    ax[1].text(0.02, 12.3, "spread reported in the paper (SF16 @ ResNet-56)",
-               fontsize=8, color="#d62728", transform=ax[1].get_yaxis_transform())
+    ax[1].text(0.98, 11.4, "spread reported in the paper (SF16 @ ResNet-56)",
+               fontsize=8.5, color="#d62728", ha="right", va="top",
+               transform=ax[1].get_yaxis_transform())
+    ax[1].set_ylim(-0.4, 13.2)
     ax[1].set_xlabel("depth"); ax[1].set_ylabel("seed spread (pp)")
     ax[1].set_title("(b) does the reported instability reproduce?", fontsize=10)
-    ax[1].legend(fontsize=8, loc="upper left"); ax[1].grid(alpha=0.3)
+    ax[1].legend_ = None
+    ax[1].legend(fontsize=8, loc="center left"); ax[1].grid(alpha=0.3)
 
     fig.tight_layout(); p = os.path.join(out, "lab_exp7_plain_depth.png")
     fig.savefig(p, dpi=180); plt.close(fig); return p
