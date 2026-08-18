@@ -61,6 +61,11 @@ quantization cost is measured rather than cited. Full tables and failure-mode
 analyses: [SUPERFLOAT_RESULTS.md](SUPERFLOAT_RESULTS.md). Scripts and Modal
 apps: [benchmarks/README.md](benchmarks/README.md).
 
+A separate study asks how the usable precision moves with model width, depth,
+parameter count and training tokens, and finds that the floor was never set by
+precision but by where the scale factor lives:
+[SCALING_LAWS.md](SCALING_LAWS.md).
+
 ![Validation trajectories](benchmarks/figures/format_overlay.png)
 
 ### Results measured in this repository
@@ -269,6 +274,11 @@ benchmarks/         SFx training and evaluation suite (see benchmarks/README.md)
   train_vjepa_*.py    V-JEPA 2 PTQ probe and end-to-end QAT
   test_superfloat.py  correctness tests (run these first)
   make_figures.py     all paper figures, one uniform style
+  analyze_scaling.py  logistic fit of the critical precision, width law
+  make_scaling_figures.py  the four-tier scaling figures
+  make_lab_figures.py      the follow-up experiment figures
+  lab/                follow-up experiments (see benchmarks/lab/README.md)
+  results/            every raw scaling result, one JSONL per experiment
   modal/              Modal apps for the cloud sweeps
 cifar_modular/      ResNet CIFAR training used for the paper's CIFAR tables
 src/
