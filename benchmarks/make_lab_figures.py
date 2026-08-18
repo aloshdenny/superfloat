@@ -358,6 +358,54 @@ def fig_plain(rows4, rows7, out):
     fig.savefig(p, dpi=180); plt.close(fig); return p
 
 
+def fig_tierd(rows, out):
+    """exp8: does 4.1's inversion reproduce, with records kept this time?
+
+    Tier D's three-seed evidence was run on ephemeral capacity and never
+    written back, so the claim survived only in a commit message. This reruns
+    the whole cell -- bits {0,2,3,4} x seeds {0,1,2} at 11m under mode ln --
+    including its own FP32 controls, so no penalty depends on a control
+    measured elsewhere.
+    """
+    if not rows: return None
+    g = collections.defaultdict(dict)
+    for r in rows:
+        g[r["seed"]][r["bits"]] = r["final_val_loss"]
+    seeds = sorted(s for s in g if 0 in g[s])
+    B = [2, 3, 4]
+    if not seeds: return None
+    fig, ax = plt.subplots(1, 2, figsize=(13.6, 4.8))
+
+    for i, sd in enumerate(seeds):
+        d = g[sd]
+        ax[0].plot(B, [d[b] - d[0] for b in B if b in d], marker="o", ms=6,
+                   lw=1.8, color=C[i % len(C)], label=f"seed {sd}")
+    ax[0].plot(B, [0.108, 0.152, 0.187], marker="s", ms=6, lw=1.8, ls="--",
+               color="#555555", label="tier D, as reported")
+    ax[0].set_xticks(B); ax[0].set_xticklabels([f"SF{b}" for b in B])
+    ax[0].set_xlabel("SuperFloat precision")
+    ax[0].set_ylabel("penalty vs own FP32 control (nats)")
+    ax[0].set_title("(a) fewer bits lands closer to FP32, in every seed",
+                    fontsize=10)
+    ax[0].legend(fontsize=8); ax[0].grid(alpha=0.3)
+
+    mean = {b: float(np.mean([g[s][b] - g[s][0] for s in seeds])) for b in B}
+    spread = {b: float(np.ptp([g[s][b] - g[s][0] for s in seeds])) for b in B}
+    x = np.arange(len(B)); w = 0.36
+    ax[1].bar(x - w/2, [0.108, 0.152, 0.187], w, color="#999999",
+              label="tier D, as reported")
+    ax[1].bar(x + w/2, [mean[b] for b in B], w, color=C[0],
+              yerr=[spread[b]/2 for b in B], capsize=4, label="exp8, re-run")
+    ax[1].set_xticks(x); ax[1].set_xticklabels([f"SF{b}" for b in B])
+    ax[1].set_ylabel("mean penalty (nats)")
+    ax[1].set_title("(b) every cell within 0.016 nats of the original",
+                    fontsize=10)
+    ax[1].legend(fontsize=8); ax[1].grid(alpha=0.3, axis="y")
+
+    fig.tight_layout(); p = os.path.join(out, "lab_exp8_tierd_replication.png")
+    fig.savefig(p, dpi=180); plt.close(fig); return p
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-dir", default="."); ap.add_argument("--out", default="figures")
@@ -371,6 +419,10 @@ def main():
         print(f"  {exp}: {len(rows)} rows")
         p = fn(rows, a.out)
         if p: made.append(p)
+    rows8 = load(a.results_dir, "exp8")
+    print(f"  exp8: {len(rows8)} rows")
+    p = fig_tierd(rows8, a.out)
+    if p: made.append(p)
     rows7 = load(a.results_dir, "exp7")
     print(f"  exp7: {len(rows7)} rows")
     p = fig_plain(got.get("exp4", []), rows7, a.out)

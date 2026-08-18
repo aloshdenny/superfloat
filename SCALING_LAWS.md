@@ -1,7 +1,7 @@
 # SuperFloat precision scaling study
 
 How far SuperFloat can be pushed, measured rather than argued, across four
-experiment tiers and seven follow-ups. 866 runs are archived under
+experiment tiers and eight follow-ups. 878 runs are archived under
 `benchmarks/results`, and every figure in this document regenerates from them.
 
 | tier | question | substrate | runs |
@@ -23,6 +23,7 @@ actually goes (section 5):
 | 5 | where do dead weights sit, layer by layer? | ResNet-20 at init | 4 |
 | 6 | does usable step size track grid resolution? | ResNet-20, 10 learning rates | 60 |
 | 7 | does the paper's ResNet-56 instability reproduce? | ResNet-20 to 56, plain SF | 24 |
+| 8 | does 4.1's inversion reproduce, with records kept? | GPT 10.6M, mode ln, 3 seeds | 12 |
 
 Everything below is weights-only quantization with an FP32/FP16 head, and every
 penalty is measured against a control trained in the **same** condition. That
@@ -72,6 +73,10 @@ the same condition:
 One prior number does not survive. The paper's 12.0-point seed spread for SF16
 on ResNet-56 measures 0.94 points here across three seeds in the same plain
 condition, and no cell in 72 runs exceeds 1.08. (5.6)
+
+One does. Tier D's coarser-is-better inversion, whose original records were
+lost, replicates on independent hardware with every cell within 0.016 nats.
+(4.1)
 
 ---
 
@@ -377,13 +382,35 @@ The ordering within `ln` at 11m inverts, and three seeds show it is not noise:
 Fewer bits is consistently better, in every seed, with a SF2-to-SF4 gap of
 0.079 nats against a worst-case spread of 0.047.
 
-**These three rows are the one result here that does not regenerate from the
-archive.** The seed replicates were run on ephemeral capacity and their records
-were never written back, so `scaling_d.jsonl` holds the 36-run base grid and
-not the six extra seeds. The numbers above are as originally reported; they are
-simply no longer backed by retained data, and should be treated as weaker than
-everything else in this document until re-run. Section 5.4 does not repair
-this, since it runs at 5M where no inversion exists.
+**These records were lost, and the cell has since been re-run in full.** The
+original seed replicates went to ephemeral capacity and were never written
+back, leaving the claim resting on a commit message. Experiment 8 reruns the
+whole cell independently, on different hardware, including its own FP32
+control per seed so no penalty leans on a control measured elsewhere:
+
+| seed | SF2 | SF3 | SF4 | ordering |
+| --- | --- | --- | --- | --- |
+| 0 | +0.078 | +0.133 | +0.181 | inverted |
+| 1 | +0.079 | +0.136 | +0.172 | inverted |
+| 2 | +0.119 | +0.168 | +0.177 | inverted |
+| **mean** | **+0.092** | **+0.146** | **+0.177** | |
+| spread | 0.041 | 0.035 | 0.009 | |
+
+| | SF2 | SF3 | SF4 | gap | worst spread |
+| --- | --- | --- | --- | --- | --- |
+| tier D, as reported | +0.108 | +0.152 | +0.187 | 0.079 | 0.047 |
+| exp8, re-run | +0.092 | +0.146 | +0.177 | 0.085 | 0.041 |
+
+Every cell lands within 0.016 nats of the original, the ordering inverts in
+all three seeds, and the SF2-to-SF4 gap of 0.085 is twice the worst seed
+spread. The effect is real and now backed by retained records in
+`benchmarks/results/exp8.jsonl`.
+
+Absolute losses differ from tier D's, because the validation split here is the
+tail of a 400M-token corpus rather than of Modal's 1.1B one. Penalties are the
+comparable quantity and are what this section reports.
+
+![tier D replication](benchmarks/figures/lab_exp8_tierd_replication.png)
 
 Read this narrowly. All three remain *above* their FP32 control, so this is
 not ternary beating full precision; it is that among quantized options under
@@ -658,9 +685,12 @@ as a property of the format.
 - **The SF5 non-monotonicity in N is unexplained.** It replicates (see 3.1) but
   no mechanism is offered.
 - **The inverted precision ordering under scale absorption** (4.1) is measured
-  at one architecture and one size, and its three-seed evidence is no longer
-  backed by retained records (see 4.1). Re-running it at 11M is the single
-  highest-value open item in this study.
+  at one architecture and one size. It now replicates across hardware and
+  implementations (experiment 8, every cell within 0.016 nats), so it is not a
+  measurement artefact; what remains unexplained is the mechanism. The
+  regularisation hypothesis predicts it should weaken as tokens-per-parameter
+  grows, and 5.4 could not test that because it ran at 5M where no inversion
+  exists. Sweeping D/N at 11M is the open item.
 - **PTQ under scale absorption** was never run. Given SF4 PTQ destroys every
   model tested, it is the obvious next experiment.
 - **Activation quantization** is out of scope for the four tiers; 5.1 measures
@@ -740,6 +770,7 @@ benchmarks/
   lab/exp3_reg.py              precision as regulariser, across D/N
   lab/exp5_alloc.py            per-layer dead-weight profile
   lab/exp6_lr.py               (precision, learning rate) stability grid
+  lab/exp8_tierd_seeds.py      11m re-run of 4.1, three seeds with controls
   lab/README.md                what each experiment asks, and how to run it
   analyze_scaling.py           logistic fit of p0, width law
   make_scaling_figures.py      the four-tier figures

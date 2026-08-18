@@ -19,6 +19,7 @@ silent bug visible, and several were caught that way.
 | 5 | `exp5_alloc.py` | where do dead weights sit, layer by layer? | in wide layers, exactly as fan_in predicts |
 | 6 | `exp6_lr.py` | does usable step size track grid resolution? | no, not over a 640x range |
 | 7 | `exp1_act.py --no-chan-norm --depth` | does the paper's ResNet-56 instability reproduce? | no: 0.94 pp against 12.0 |
+| 8 | `exp8_tierd_seeds.py` | does 4.1's inversion reproduce, with records kept? | yes: every cell within 0.016 nats |
 
 ## Running
 
@@ -33,13 +34,17 @@ python exp3_reg.py  --prepare              # tokenise once, ~10 min
 python exp3_reg.py  --tpp 20 --bits 4 --seed 0
 python exp5_alloc.py --bits 4
 python exp6_lr.py   --bits 8 --lr 4e-3
+python exp8_tierd_seeds.py --prepare       # same corpus as exp3
+python exp8_tierd_seeds.py --size 11m --tpp 10 --bits 2 --seed 1
 ```
 
 ## Concurrency
 
 These pods have 24 GB. A CIFAR run holds about 3 GB and six fit comfortably;
 the GPU is launch-bound below that and sits at 20% utilisation with one stream.
-The 5M language model in `exp3_reg.py` is different: it allocates about 8.5 GB
+The 11M model in `exp8_tierd_seeds.py` allocates about 13.4 GB, so three
+streams fit a 46 GB card and a fourth OOMs. The 5M language model in
+`exp3_reg.py` is different: it allocates about 8.5 GB
 but its caching allocator reserves up to 14.7 GB, so **two streams are the
 limit and three OOM**. Run it with
 
