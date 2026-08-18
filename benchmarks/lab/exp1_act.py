@@ -31,12 +31,14 @@ MEAN = (0.5071, 0.4865, 0.4409); STD = (0.2673, 0.2564, 0.2762)
 
 class SFConv(nn.Conv2d):
     """Conv with independent weight and activation precision."""
-    bits_w = 16; bits_a = 0
-    def setup(self, bits_w, bits_a):
-        self.bits_w, self.bits_a = bits_w, bits_a
+    bits_w = 16; bits_a = 0; chan_norm = True
+    def setup(self, bits_w, bits_a, chan_norm=True):
+        self.bits_w, self.bits_a, self.chan_norm = bits_w, bits_a, chan_norm
         self.sw, self.vw = sf_params(bits_w) if bits_w else (0, 0)
         self.sa, self.va = sf_params(bits_a) if bits_a else (0, 0)
         self.register_buffer("a_scale", torch.ones(1))
+        self.register_buffer("clip_n", torch.zeros((), dtype=torch.long))
+        self.register_buffer("seen_n", torch.zeros((), dtype=torch.long))
         return self
 
     def forward(self, x):
@@ -45,11 +47,22 @@ class SFConv(nn.Conv2d):
                 m = x.detach().abs().amax()
                 # EMA so the deployed scale is a constant, not a batch statistic
                 self.a_scale.mul_(0.99).add_(0.01 * m.clamp_min(1e-8))
-            x = sf_quantize_sv(x / self.a_scale.clamp_min(1e-8), self.sa, self.va)
+            xs = x / self.a_scale.clamp_min(1e-8)
+            if not self.training:
+                # mechanism metric: the analogue of dead_fraction for weights.
+                # An activation floor is only interpretable if we know whether
+                # it comes from clipping at the bound or from grid coarseness.
+                with torch.no_grad():
+                    self.clip_n += (xs.abs() > self.va).sum()
+                    self.seen_n += xs.numel()
+            x = sf_quantize_sv(xs, self.sa, self.va)
         w = self.weight
         if self.bits_w:
-            s = w.abs().amax(dim=(1, 2, 3), keepdim=True).clamp_min(1e-8)
-            w = sf_quantize_sv(w / s, self.sw, self.vw)
+            if self.chan_norm:
+                s = w.abs().amax(dim=(1, 2, 3), keepdim=True).clamp_min(1e-8)
+                w = sf_quantize_sv(w / s, self.sw, self.vw)
+            else:
+                w = sf_quantize_sv(w, self.sw, self.vw)
         return self._conv_forward(x, w, None)
 
 
@@ -92,7 +105,12 @@ def build(width_mult=1.0, classes=100, depth=20):
 
 def load_gpu(train):
     import torchvision
-    ds = torchvision.datasets.CIFAR100(DATA, train=train, download=True)
+    # download=True re-verifies the 169MB tarball's MD5 on every call; with six
+    # concurrent streams that is a synchronised GPU-idle window at each config
+    # start. Fetch once if missing, then never re-check.
+    import os as _os
+    have = _os.path.isdir(_os.path.join(DATA, "cifar-100-python"))
+    ds = torchvision.datasets.CIFAR100(DATA, train=train, download=not have)
     x = torch.from_numpy(np.asarray(ds.data)).permute(0, 3, 1, 2).contiguous()
     return x.cuda(), torch.tensor(ds.targets, dtype=torch.long).cuda()
 
@@ -107,10 +125,13 @@ def main():
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--tag-prefix", default="exp1")
+    ap.add_argument("--no-chan-norm", action="store_true",
+                    help="plain SF: quantize weights as-is, no per-channel scale")
     a = ap.parse_args()
 
     disable_tf32(); torch.manual_seed(a.seed)
-    tag = f"{a.tag_prefix}_w{a.bits_w}_a{a.bits_a}_d{a.depth}_s{a.seed}"
+    tag = (f"{a.tag_prefix}_w{a.bits_w}_a{a.bits_a}_d{a.depth}_s{a.seed}"
+           + ("_plain" if a.no_chan_norm else ""))
     if os.path.exists(f"{OUT}/{tag}.json"):
         print(f"[{tag}] already done, skipping", flush=True); return
 
@@ -118,7 +139,7 @@ def main():
     nconv = 0
     for m in model.features.modules():
         if isinstance(m, SFConv):
-            m.setup(a.bits_w, a.bits_a).cuda(); nconv += 1
+            m.setup(a.bits_w, a.bits_a, not a.no_chan_norm).cuda(); nconv += 1
     print(f"[{tag}] convs={nconv} bits_w={a.bits_w} bits_a={a.bits_a}", flush=True)
 
     xtr, ytr = load_gpu(True); xte, yte = load_gpu(False)
@@ -156,7 +177,17 @@ def main():
         if ep % 15 == 0 or ep == a.epochs - 1:
             print(f"[{tag}] ep{ep} acc={acc:.2f} best={best:.2f} "
                   f"({(time.time()-t0)/60:.0f}m)", flush=True)
-    rec = {"exp": a.tag_prefix, "bits_w": a.bits_w, "bits_a": a.bits_a,
+    clip, scales = [], []
+    for m in model.features.modules():
+        if isinstance(m, SFConv) and m.bits_a:
+            clip.append(float(m.clip_n.item()) / max(int(m.seen_n.item()), 1))
+            scales.append(float(m.a_scale.item()))
+    rec = {"exp": a.tag_prefix, "chan_norm": not a.no_chan_norm,
+           "bits_w": a.bits_w, "bits_a": a.bits_a,
+           "clip_frac_mean": (sum(clip)/len(clip)) if clip else 0.0,
+           "clip_frac_max": max(clip) if clip else 0.0,
+           "a_scale_max": max(scales) if scales else 0.0,
+           "a_scale_per_layer": scales, "clip_per_layer": clip,
            "depth": a.depth, "seed": a.seed, "best_acc": best,
            "final_acc": hist[-1]["acc"], "minutes": (time.time()-t0)/60,
            "history": hist, "complete": True}
