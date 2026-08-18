@@ -156,12 +156,16 @@ def fig_dn(rows, out):
 
 
 def fig_reg(rows, out):
-    """exp3: does coarse-is-better die as tokens-per-parameter grows?
+    """exp3: how the precision penalty moves with tokens-per-parameter.
 
-    Tier D found lower precision beating higher under scale absorption. If that
-    inversion is a regularisation effect it should be a small-data artefact:
-    give the model more tokens per parameter and the coarser grid should lose
-    its advantage and then fall behind.
+    Section 3.3 found PTQ damage U-shaped in tokens but could not separate D/N
+    from learning-rate decay, since both advance together along a Pythia run.
+    Here every cell completes its own schedule, so decay is held fixed and only
+    D/N moves.  The U survives, which rules out decay as the whole story.
+
+    This was designed to test tier D's coarse-is-better inversion, but that is
+    an 11M effect and this runs at 5M, where neither tier D nor this sweep
+    shows one.  It does not speak to 4.1.
     """
     if not rows: return None
     g = collections.defaultdict(dict)
@@ -190,8 +194,8 @@ def fig_reg(rows, out):
     ax[1].axhline(0, color="k", lw=0.8, ls=":")
     ax[1].set_xscale("log"); ax[1].set_xlabel("tokens per parameter")
     ax[1].set_ylabel("penalty vs FP32 control (nats)")
-    ax[1].set_title("(b) if the inversion is regularisation, the gaps\n"
-                    "should widen as data grows", fontsize=10)
+    ax[1].set_title("(b) U-shaped in D/N, with every cell completing\n"
+                    "its own schedule: decay is not the whole story", fontsize=10)
     ax[1].legend(fontsize=9); ax[1].grid(alpha=0.3)
 
     fig.tight_layout(); p = os.path.join(out, "lab_exp3_regularisation.png")

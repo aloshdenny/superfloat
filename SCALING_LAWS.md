@@ -269,10 +269,10 @@ to 25x better, with the gap widening the further past compute-optimal the model
 is trained.
 
 **Caveat.** Learning-rate decay and over-training are confounded along a single
-training run: both advance together, and nothing here separates them. Tier E
-(3.4) varies D/N with each run completing its own schedule, which holds decay
-fixed while D/N moves, but it does so under QAT on a 5M model rather than PTQ
-on Pythia. A clean separation needs Pythia-scale runs with the schedule
+training run: both advance together, and nothing here separates them. Section 5.4
+varies D/N with each run completing its own schedule, which holds decay fixed
+while D/N moves, and finds the U survives; but it does so under QAT on a 5M
+model rather than PTQ on Pythia. A clean separation needs Pythia-scale runs with the schedule
 truncated at matched token counts, which was not affordable here.
 
 ![LM tiers](benchmarks/figures/scaling_ab_lm.png)
@@ -478,6 +478,61 @@ rate search, which removes the most expensive part of adopting a low-precision
 format.
 
 ![lr law](benchmarks/figures/lab_exp6_lr_law.png)
+
+### 5.4 The U-shape is not only an artefact of learning-rate decay
+
+Section 3.3 found PTQ damage U-shaped in training tokens but could not separate
+the two things that advance together along a Pythia run: tokens accumulate and
+the cosine schedule decays. exp3 separates them. It trains a 5M transformer
+under scale absorption at four token budgets, and **every run completes its own
+schedule**, so learning-rate decay is held fixed across cells and only D/N
+moves.
+
+Penalty against each row's own FP32 control, in nats:
+
+| D/N | tokens | FP32 loss | SF2 | SF3 | SF4 | SF6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 5 | 24M | 7.330 | +0.458 | +0.202 | +0.110 | -0.014 |
+| 10 | 47M | 7.065 | +0.163 | +0.144 | +0.106 | -0.022 |
+| 20 | 95M | 6.648 | **+0.075** | **+0.132** | +0.106 | -0.004 |
+| 40 | 190M | 5.980 | +0.347 | +0.330 | +0.281 | -0.015 |
+
+The U survives. SF2 falls from +0.458 to +0.075 and then rises to +0.347; SF3
+and SF4 do the same with shallower troughs. Since the schedule is completed in
+every cell, the rise at 40x cannot be attributed to decay, and D/N is doing
+real work of its own. This does not prove decay contributes nothing in the
+Pythia case, but it removes the possibility that decay is the whole story.
+
+The minimum sits near 10 to 20 tokens per parameter here, against 40 to 100 in
+3.3. Different architecture, different size, QAT rather than PTQ, so the
+locations are not expected to match; the shape is what carries over.
+
+**An independent replication.** exp3's D/N = 10 row is the same condition as
+tier D's 5m `ln` arm, run months apart on different hardware and a different
+implementation:
+
+| | tier D, Modal H100 | exp3, RunPod 3090 |
+| --- | --- | --- |
+| SF2 | +0.175 | +0.163 |
+| SF3 | +0.157 | +0.144 |
+| SF4 | +0.123 | +0.106 |
+| SF6 | -0.018 | -0.022 |
+
+Agreement within 0.017 nats across the row, which is the tightest cross-run
+check in this study apart from the 54-cell PTQ overlap in 3.3.
+
+**What this does not test.** exp3 runs at 5M, and the inversion of 4.1 is an
+11M effect: at 5M neither tier D nor exp3 shows one, and both order the
+penalties normally, with finer grids doing better. So exp3 leaves 4.1 exactly
+where it was. Testing that claim needs this sweep at 11M, which was not run.
+
+The one persistent oddity is SF6, which lands slightly *below* its FP32 control
+in all four rows and in tier D's 5m arm as well, by 0.004 to 0.022 nats. SF16
+does not, sitting within 0.003 of its control. Six independent cells agreeing
+in sign is suggestive, but each is a single seed and the effect is the size of
+the seed spread reported elsewhere, so it is recorded rather than claimed.
+
+![regularisation](benchmarks/figures/lab_exp3_regularisation.png)
 
 ## 6. What is not established
 
