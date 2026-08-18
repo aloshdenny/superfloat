@@ -8,8 +8,9 @@ and concentrated near zero, so the dynamic range an exponent buys is largely
 unused at inference time.
 
 This repository holds the format definition, the training and benchmark suite,
-and the measured results. The silicon, the compiler and the website live in
-their own repositories:
+the measured results, and a scaling study of 878 archived runs that establishes
+where the usable precision floor actually comes from. The silicon, the compiler
+and the website live in their own repositories:
 
 | Repository | What it is |
 | --- | --- |
@@ -61,10 +62,10 @@ quantization cost is measured rather than cited. Full tables and failure-mode
 analyses: [SUPERFLOAT_RESULTS.md](SUPERFLOAT_RESULTS.md). Scripts and Modal
 apps: [benchmarks/README.md](benchmarks/README.md).
 
-A separate study asks how the usable precision moves with model width, depth,
-parameter count and training tokens, and finds that the floor was never set by
-precision but by where the scale factor lives:
-[SCALING_LAWS.md](SCALING_LAWS.md).
+A second study asks how the usable precision moves with model width, depth,
+parameter count and training tokens: [SCALING_LAWS.md](SCALING_LAWS.md), 878
+archived runs across four tiers and eight follow-ups. Its result reframes
+everything below.
 
 ![Validation trajectories](benchmarks/figures/format_overlay.png)
 
@@ -85,20 +86,39 @@ precision but by where the scale factor lives:
 - **SF4 is free on classification** (96.27 ±0.03 vs FP32's 96.31 ±0.55, at
   87.5% storage reduction) but costs 15–22% on dense localisation.
 
-### Two reproducible failure modes
+### Failure modes, and which ones survived scrutiny
 
 **Weight quantization is architecture-agnostic; activation quantization is
 not.** Clamping activations to [−1, 1] is nearly free after BatchNorm, which
 holds CNN activations near unit scale. A ViT residual stream accumulates across
 24 blocks: measured max |a| = **256.1**, with **26.3%** of activations outside
 the bound across 193 of 292 layers. Quantization-aware training does not
-recover it.
+recover it. *Confirmed and quantified* by the scaling study, which finds
+activations need SF6 where weights need SF3–SF4, with clipping — not grid
+coarseness — as the mechanism.
 
-**Usable learning rate must match grid resolution, from both sides.** SF8 from
-random init diverges at the FP32 recipe's 4e-3 (0.0748 ±0.0017 over 3 seeds)
-and trains normally at 1e-3, because its grid is 256× coarser than SF16's. SF4
-fails in the opposite direction: standard Kaiming init places weights an order
-of magnitude below its 0.0625 floor, zeroing **99.98%** of them at step 0.
+**Kaiming init places weights below the grid floor.** Standard init puts
+weights an order of magnitude under SF4's 0.0625 step, zeroing **99.98%** of
+them at step 0. *Confirmed, and now fixed:* per-channel normalisation before
+quantization removes the `fan_in` dependence entirely, and the scale is
+absorbed by the neighbouring norm so inference arithmetic stays pure SF. This
+is the single change that moves the CNN floor from SF5–SF6 to SF2.
+
+**~~Usable learning rate must match grid resolution.~~ Retired — it does not
+reproduce.** This README previously reported that SF8 from random init diverges
+at the FP32 recipe's 4e-3 and trains only at 1e-3, its grid being 256× coarser
+than SF16's. A dedicated sweep of 60 cells — six precisions crossed with ten
+learning rates spanning 1e-4 to 6e-2, a 640× range, in the same plain condition
+with no normalisation — found **not one divergence at any precision**, and the
+accuracy optimum at 4e-3 for SF4, SF6, SF8 and SF16 alike. SF3's optimum is
+8e-3, *twice* SF16's rather than a fraction of it. The curves differ in height,
+not in position.
+
+What the sweep does not do is explain the original observation; the recipes
+differ in optimiser, schedule, dataset and model, and nothing isolates which.
+The practical consequence stands either way: **precision and learning rate can
+be tuned independently**, so an FP32 recipe transfers to SF4 without a
+learning-rate search.
 
 ### Prior results from the paper
 
@@ -147,6 +167,65 @@ CIFAR tables show SFx destabilising at depth with large seed variance
 (SF16 at R56: 47.1 ±12.0), whereas the modern-architecture results here are
 stable, and the instabilities that do appear have identified, reproducible
 causes rather than seed dependence.
+
+---
+
+---
+
+## Scaling laws: precision was never the binding constraint
+
+The floors reported in the benchmark tables — SF6 for QAT, SF8 for PTQ, total
+collapse below SF4 — are **not properties of the number format**. They are
+artefacts of trained weights sitting far below the grid step. Kaiming
+initialisation sets `sigma = sqrt(2/fan_in)`, which shrinks as layers widen
+while the SF grid stays fixed, so wide layers start entirely inside the first
+quantization bin. Measured at initialisation, under plain SF every layer with
+`fan_in >= 144` is **100% dead at SF3**: the network is an exactly zero
+function and no gradient can revive it.
+
+Divide each weight by its per-channel maximum before quantizing, and the
+dependence vanishes — the dead fraction becomes flat in `fan_in` and halves
+with each added bit (12.5%, 6.3%, 3.2%, 1.6% at SF3–SF6). The scale is
+absorbed by the BatchNorm that follows the conv, or by the norm that feeds the
+matmul in a transformer, so **it never enters the inference arithmetic**. On
+Atreides that scale lives in the normalisation unit, outside the systolic
+array; registers and the MAC array still compute only in SF range.
+
+| regime | floor before | floor after |
+| --- | --- | --- |
+| CNN, QAT from scratch | SF5–SF6 | **SF2** — within 1.5 points of SF16 |
+| Transformer, QAT from scratch | SF6 | **SF3–SF4** — 0.02–0.12 nats |
+| Transformer, PTQ | SF8 | not tested |
+
+SF2 is exactly ternary `{−0.5, 0, +0.5}` — the BitNet b1.58 operating point —
+reached here without a ternary-specific training recipe.
+
+### What else the sweeps found
+
+- **The two operands are not symmetric.** Weights saturate at SF3–SF4;
+  activations need SF6, and below that the weight precision stops mattering at
+  all. The cause is clipping, not grid coarseness: activations are one-sided
+  and heavy-tailed after ReLU, so a symmetric fixed-range format spends half
+  its codes on values that never occur. **A datapath giving both operands the
+  same width is misallocating** — it wants 3–4 bits on the weight operand and
+  6 on the activation operand.
+- **Width raises the precision requirement; depth does not.** Critical
+  precision rises `+0.29` bits per width doubling (against `+0.50` predicted by
+  the initialisation argument), but is flat across ResNet-20 to ResNet-56 —
+  depth changes no layer's `fan_in`. Deeper networks simply pay a smaller
+  penalty: SF2 costs 4.23 points at ResNet-20 and 1.92 at ResNet-56.
+- **PTQ damage is U-shaped in training tokens**, not monotone. Both ends of a
+  training run are fragile and the middle is not. The worst checkpoint to
+  quantize is the one that ships: over-training a 160M model to 300B tokens
+  costs **2.5 bits** of deployable precision.
+- **Precision and learning rate are independent knobs** — no divergence in
+  60 cells across a 640x range of step size, retiring a claim this README
+  previously made (see [failure modes](#failure-modes-and-which-ones-survived-scrutiny)).
+
+![Width law](benchmarks/figures/scaling_c_width.png)
+
+Full method, tables and caveats: [SCALING_LAWS.md](SCALING_LAWS.md). Which
+script produced which number, and which figure: [study map](#study-map-for-the-paper).
 
 ---
 
@@ -267,28 +346,101 @@ sf16 literal_test() {
 ## Repository layout
 
 ```
-benchmarks/         SFx training and evaluation suite (see benchmarks/README.md)
-  superfloat.py       SFx grid, bounded STE, layer surgery, clamping
-  train_eurosat.py    ConvNeXt-Tiny classification
-  train_yolo.py       YOLO detection via Ultralytics callbacks
-  train_vjepa_*.py    V-JEPA 2 PTQ probe and end-to-end QAT
-  test_superfloat.py  correctness tests (run these first)
-  make_figures.py     all paper figures, one uniform style
-  analyze_scaling.py  logistic fit of the critical precision, width law
+benchmarks/
+  superfloat.py            SFx grid, bounded STE, layer surgery, clamping
+  test_superfloat.py       correctness tests (run these first)
+  train_eurosat.py         ConvNeXt-Tiny classification
+  train_yolo.py            YOLO detection via Ultralytics callbacks
+  train_vjepa_*.py         V-JEPA 2 PTQ probe and end-to-end QAT
+  make_figures.py          evaluation figures, one uniform style
+  analyze_scaling.py       logistic fit of critical precision, width law
   make_scaling_figures.py  the four-tier scaling figures
   make_lab_figures.py      the follow-up experiment figures
-  lab/                follow-up experiments (see benchmarks/lab/README.md)
-  results/            every raw scaling result, one JSONL per experiment
-  modal/              Modal apps for the cloud sweeps
-cifar_modular/      ResNet CIFAR training used for the paper's CIFAR tables
+  build_results_archive.py folds raw run dirs into one JSONL per experiment
+  lab/                     follow-up experiments (see lab/README.md)
+  modal/                   Modal apps for the cloud sweeps
+  results/                 every raw run, one JSONL per experiment
+  figures/                 every rendered figure
+cifar_modular/             ResNet CIFAR training for the paper's CIFAR tables
 src/
-  modal/              GPT-2/GPT-3 pretraining under clamped matmul
-  test/               matrix/stream generators for hardware testbenches
-  verilog/            early FPGA functional units (superseded by superfloat.gpu)
-Q115 layer story.py Layer-by-layer Q1.15 vs FP32 signal analysis on ResNet-20
-assets/results/     weight-distribution studies and architecture figures
-docs/paper/         TPAMI manuscript, anonymized main document and title page
+  modal/                   GPT-2/GPT-3 pretraining under clamped matmul
+  test/                    matrix/stream generators for hardware testbenches
+  verilog/                 early FPGA units (superseded by superfloat.gpu)
+Q115 layer story.py        layer-by-layer Q1.15 vs FP32 analysis on ResNet-20
+assets/results/            weight-distribution studies, architecture figures
+docs/paper/                TPAMI manuscript, anonymized main doc and title page
+SUPERFLOAT_RESULTS.md      evaluation tables and failure-mode analyses
+SCALING_LAWS.md            the scaling study, sections 1-8
 ```
+
+---
+
+## Study map, for the paper
+
+Every claim in [SCALING_LAWS.md](SCALING_LAWS.md) traces to a script, an
+archived result file and a figure. Nothing below needs a live GPU to
+reproduce: both figure scripts read `benchmarks/results/`.
+
+**Four tiers** — the original sweep, run on Modal.
+
+| tier | question | script | results | figure | §  |
+| --- | --- | --- | --- | --- | --- |
+| A | QAT cost vs model size | `modal/modal_scaling_a.py` | `scaling_a.jsonl` (34) | `scaling_ab_lm.png` | 3.1 |
+| B | PTQ cost vs size and data | `modal/modal_scaling_b.py` | `scaling_b.jsonl` (172) | `scaling_ab_lm.png` | 3.2–3.3 |
+| C | where a network stops training | `modal/modal_scaling_c.py` | `scaling_c.jsonl` (258) | `scaling_c_width.png` | 2 |
+| D | carrying the fix to transformers | `modal/modal_scaling_d.py` | `scaling_d.jsonl` (36) | `scaling_d_absorption.png` | 4 |
+
+**Eight follow-ups** — run on single GPUs, `benchmarks/lab/`.
+
+| # | question | script | results | figure | § |
+| --- | --- | --- | --- | --- | --- |
+| 1 | weight vs activation precision | `lab/exp1_act.py` | `exp1.jsonl` (42) | `lab_exp1_activation.png` | 5.1 |
+| 2 | PTQ damage vs training tokens | `lab/exp2_dn.py` | `exp2.jsonl` (168) | `lab_exp2_dn_law.png` | 3.3 |
+| 3 | penalty vs tokens-per-parameter | `lab/exp3_reg.py` | `exp3.jsonl` (20) | `lab_exp3_regularisation.png` | 5.4 |
+| 4 | does depth move the floor | `lab/exp1_act.py --depth` | `exp4.jsonl` (48) | `lab_exp4_depth.png` | 5.5 |
+| 5 | per-layer dead-weight profile | `lab/exp5_alloc.py` | `exp5_profile.jsonl` (4) | `lab_exp5_per_layer.png` | 5.2 |
+| 6 | precision vs learning rate | `lab/exp6_lr.py` | `exp6.jsonl` (60) | `lab_exp6_lr_law.png` | 5.3 |
+| 7 | ResNet-56 seed spread, plain SF | `lab/exp1_act.py --no-chan-norm` | `exp7.jsonl` (24) | `lab_exp7_plain_depth.png` | 5.6 |
+| 8 | re-run of 4.1's lost seeds | `lab/exp8_tierd_seeds.py` | `exp8.jsonl` (12) | `lab_exp8_tierd_replication.png` | 4.1 |
+
+**Analysis figures** not tied to a single sweep:
+
+| figure | what it shows | produced by |
+| --- | --- | --- |
+| `scaling_critical_precision.png` | logistic p0 fit, width law vs Kaiming | `analyze_scaling.py` |
+| `scaling_qat_vs_ptq.png` | QAT and PTQ thresholds side by side | `analyze_scaling.py` |
+
+**Evaluation figures** for the benchmark tables live in the same directory and
+are produced by `make_figures.py`: `format_overlay.png`,
+`accuracy_vs_storage.png`, `failure_modes.png`, and the `convergence_*.png`
+series. One is stale: `sf8_learning_rate.png` illustrates the learning-rate
+claim retired above, and should not be used without the correction in 5.3.
+
+### Regenerating everything
+
+```bash
+cd benchmarks
+python make_scaling_figures.py --results-dir results --out figures/
+python make_lab_figures.py     --results-dir results --out figures/
+python analyze_scaling.py      --results-dir results --out figures/
+```
+
+### Numbers most likely to be cited
+
+| claim | value | § |
+| --- | --- | --- |
+| CNN floor, plain SF vs normalised | SF5–SF6 → **SF2** (1.0 → 72.7 at ×4 width) | 2.3 |
+| Transformer floor under absorption | SF6 → **SF3–SF4** | 4 |
+| Critical precision vs width | **+0.29** bits/doubling, vs +0.50 predicted | 2.2 |
+| Critical precision vs depth | **flat**, ResNet-20 to ResNet-56 | 5.5 |
+| Weight vs activation requirement | **SF3–SF4** vs **SF6** | 5.1 |
+| Dead weights at init, SF3, fan_in ≥ 144 | **100%** plain, **12.5%** normalised | 5.2 |
+| Divergences across a 640× LR range | **0 of 60** | 5.3 |
+| Cost of over-training a 160M model to 300B tokens | **2.5 bits** | 3.3 |
+| Reported SF16 @ ResNet-56 seed spread | **12.0 → 0.94** points | 5.6 |
+| Tier D inversion, re-run | every cell within **0.016** nats | 4.1 |
+
+---
 
 ## Usage
 

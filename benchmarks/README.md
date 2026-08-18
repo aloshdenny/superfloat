@@ -76,6 +76,14 @@ point rather than noise on a shared axis. The collapsed SF8 lr-4e-3 runs are
 likewise kept in `sf8_learning_rate.png`, where the collapse is what the figure
 is about.
 
+> **`sf8_learning_rate.png` is superseded.** It illustrates the claim that
+> usable learning rate tracks grid resolution. A 60-cell sweep -- six
+> precisions by ten learning rates over a 640x range, in the same plain
+> condition -- found no divergence at any precision, with the optimum at 4e-3
+> from SF4 to SF16 alike. The figure still shows what those particular runs
+> did; it should not be cited as a property of the format. See section 5.3 of
+> [SCALING_LAWS.md](../SCALING_LAWS.md).
+
 ### EuroSAT — ConvNeXt-Tiny, from scratch, mean ± std over 3 seeds
 
 | Format | Top-1 (%) | Per-weight storage saving |

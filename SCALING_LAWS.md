@@ -426,9 +426,25 @@ with a hypothesis attached, not a mechanism.
 ## 5. Follow-up experiments
 
 The four tiers established that scale placement, not precision, sets the floor.
-Seven follow-ups ask where the remaining precision actually goes. All run on
-CIFAR-100 with the channel normalisation of 2.3 unless stated otherwise, so the
-weights they report are exact SF grid values at inference.
+Eight follow-ups ask where the remaining precision actually goes.
+
+Which condition each runs in matters, so it is stated up front rather than
+buried:
+
+| section | experiment | scale placement |
+| --- | --- | --- |
+| 5.1 | weight/activation grid | per-channel normalisation |
+| 5.2 | dead-weight profile | measures both, side by side |
+| 5.3 | learning-rate grid | **plain SF, no normalisation** |
+| 5.4 | D/N sweep | scale absorption into the norm |
+| 5.5 | depth sweep | per-channel normalisation |
+| 5.6 | ResNet-56 seed spread | **plain SF, no normalisation** |
+| 4.1 | inversion re-run | scale absorption into the norm |
+
+Where normalisation is used, the scale is absorbed by the layer that follows or
+feeds the matmul, so the weights reaching the array are exact SF grid values at
+inference. Everything is CIFAR-100 except 5.4 and 4.1, which are language
+models on FineWeb-Edu.
 
 ### 5.1 Activations, not weights, are the binding constraint
 
@@ -536,11 +552,15 @@ of step size. The optimum sits at 4e-3 for SF4, SF6, SF8 and SF16 alike, and
 SF3's optimum is 8e-3, twice SF16's rather than a fraction of it. The curves
 differ in height, not in position.
 
-The hypothesis is refuted, not merely unconfirmed, over this range. The
-original SF8 divergence is better explained by the scale mismatch of 2.3, which
-was present in that run and is corrected here: once each channel is normalised
-the network no longer initialises near zero, and the fragility that looked like
-a step-size limit disappears with it.
+The hypothesis is refuted, not merely unconfirmed, over this range.
+
+What this does **not** identify is why the original SF8 run diverged. This
+sweep is the plain condition: it calls `apply_superfloat` directly and does no
+per-channel normalisation, so scale placement is not what differs between the
+two. What differs is the rest of the recipe -- optimiser, schedule, dataset and
+model -- and nothing here isolates which part. The claim is that no
+precision-dependent stability boundary exists in this setup, not that the
+earlier observation has been explained away.
 
 **Practical consequence.** Precision and learning rate can be tuned
 independently. A recipe developed at FP32 transfers to SF4 without a learning
