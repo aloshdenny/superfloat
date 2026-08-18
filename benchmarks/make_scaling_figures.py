@@ -38,6 +38,11 @@ MIN_EPOCHS = 60
 
 
 def load(results_dir, tier):
+    """Rows for one tier, from `scaling_<tier>.jsonl` or a runs_scaling_<tier>/ dir."""
+    arch = os.path.join(results_dir, f"scaling_{tier}.jsonl")
+    if os.path.exists(arch):
+        with open(arch) as f:
+            return [json.loads(l) for l in f if l.strip()]
     out = []
     for f in glob.glob(os.path.join(results_dir, f"runs_scaling_{tier}", "*.json")):
         if "_fp16head" in f:
@@ -173,27 +178,34 @@ def fig_lm(a_rows, b_rows, outdir):
     axes[1].legend(fontsize=7, ncol=2)
     axes[1].grid(alpha=0.3)
 
-    # (c) the data axis -- same model, more tokens
+    # (c) the data axis -- same model, more tokens.  Sampling only the last
+    # four checkpoints reads as monotone growth; the full sweep from 2.1B
+    # tokens shows that rise is the right-hand half of a U.
     ck = collections.defaultdict(dict)
     for r in b_rows:
         if r.get("step"):
             ck[(r["size"], r["step"])][r["bits"]] = r["val_loss"]
-    sizes = sorted({s for s, _ in ck})
+    sizes = [s for s in ("160m", "410m", "1.4b") if any(k[0] == s for k in ck)]
     for i, size in enumerate(sizes):
-        pts = []
-        for st in sorted({s for sz, s in ck if sz == size}):
-            v = ck[(size, st)]
-            if 0 in v and 6 in v:
-                pts.append((st * 2097152 / 1e9, v[6] - v[0]))
-        if pts:
-            axes[2].plot(*zip(*pts), marker="o", ms=5, lw=1.8,
-                         color=WIDTH_COLOR[i % len(WIDTH_COLOR)], label=size)
+        for bits, ls, mk in ((7, "-", "o"), (8, "--", "s")):
+            pts = []
+            for st in sorted({s for sz, s in ck if sz == size}):
+                v = ck[(size, st)]
+                if 0 in v and bits in v:
+                    pts.append((st * 2097152 / 1e9, min(v[bits] - v[0], 20)))
+            if len(pts) < 3:
+                continue
+            axes[2].plot(*zip(*pts), marker=mk, ms=4.5, lw=1.8, ls=ls,
+                         color=WIDTH_COLOR[i % len(WIDTH_COLOR)],
+                         label=f"{size} SF{bits}")
+    axes[2].set_xscale("log")
+    axes[2].set_yscale("log")
     axes[2].set_xlabel("training tokens (B)")
-    axes[2].set_ylabel("SF6 penalty vs FP16 (nats)")
-    axes[2].set_title("(c) PTQ damage grows with tokens, not parameters",
-                      fontsize=10)
-    axes[2].legend(fontsize=8)
-    axes[2].grid(alpha=0.3)
+    axes[2].set_ylabel("PTQ penalty vs FP16 (nats)")
+    axes[2].set_title("(c) PTQ damage is U-shaped in tokens:\n"
+                      "both ends of a training run are fragile", fontsize=10)
+    axes[2].legend(fontsize=7, ncol=2)
+    axes[2].grid(alpha=0.3, which="both")
 
     fig.tight_layout()
     p = os.path.join(outdir, "scaling_ab_lm.png")
@@ -260,6 +272,19 @@ def main():
 
     a = load(args.results_dir, "a")
     b = load(args.results_dir, "b")
+    # exp2 re-measures the same Pythia PTQ grid on finer checkpoint spacing.
+    # The 54 cells the two runs share agree to 0.007 nats, so panel (c) uses
+    # the union rather than tier B's four checkpoints alone.
+    exp2 = os.path.join(args.results_dir, "exp2.jsonl")
+    if os.path.exists(exp2):
+        seen = {(r["size"], r.get("step"), r["bits"]) for r in b}
+        with open(exp2) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                if (r["size"], r.get("step"), r["bits"]) not in seen:
+                    b.append(r)
     c = load(args.results_dir, "c")
     d = load(args.results_dir, "d")
     print(f"loaded  A={len(a)}  B={len(b)}  C={len(c)}  D={len(d)}")

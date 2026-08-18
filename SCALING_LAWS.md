@@ -189,28 +189,91 @@ SF10 and above are free everywhere. SF8 is the practical threshold. SF6 and
 below destroy every model tested. The SF8 penalty is **U-shaped in N** with a
 minimum near 1B parameters.
 
-### 3.3 Damage is governed by tokens, not parameters
+### 3.3 Damage is U-shaped in training tokens
 
-The Pythia intermediate checkpoints give a data axis at fixed model size --
-the same model, more training tokens, no retraining required.
+The Pythia intermediate checkpoints give a data axis at fixed model size: the
+same model, more training tokens, no retraining required.
 
-SF6 penalty vs FP16:
+An earlier version of this study sampled only the last four checkpoints and
+read the result as monotone growth in tokens. Extending the sweep to seven
+checkpoints spanning 2.1B to 300B tokens, and to seven precisions, shows that
+rise is the right-hand half of a U. SF7 penalty vs FP16, in nats:
 
 | tokens | 160m | 410m | 1.4b |
 | --- | --- | --- | --- |
-| 27B | +0.83 | +1.50 | +3.70 |
-| 82B | +1.00 | +1.56 | +3.12 |
-| 164B | +2.48 | +2.75 | +3.90 |
-| 300B | **+8.27** | **+6.72** | **+5.48** |
+| 2.1B | +0.60 | +3.79 | +4.49 |
+| 6.3B | +0.18 | +0.35 | +0.62 |
+| 16.8B | +0.13 | +0.17 | +0.25 |
+| 41.9B | **+0.13** | **+0.17** | +0.24 |
+| 81.8B | +0.20 | +0.18 | **+0.24** |
+| 163.6B | +0.56 | +0.34 | +0.32 |
+| 299.9B | +3.16 | +1.70 | +0.69 |
 
-A 10x rise in penalty over an 11x rise in tokens at 160m, replicated at 410m.
-This confirms the data-dependence result of Kumar et al. (2024) on an
-independent format.
+SF8 traces the same curve an order of magnitude lower, with its minimum in the
+same place, so the shape is a property of the checkpoint rather than of one
+precision:
 
-The effect **weakens as models grow** -- 10x at 160m, 4.5x at 410m, 1.5x at
-1.4b -- which points at tokens-per-parameter rather than tokens as the
-governing variable, and explains the U-shape in 3.2: sorted by D/N, the SF6
-penalty is minimised around 200-300 tokens/param and rises in both directions.
+| tokens | 160m | 410m | 1.4b |
+| --- | --- | --- | --- |
+| 2.1B | +0.11 | +0.40 | +1.08 |
+| 16.8B | +0.03 | **+0.03** | +0.05 |
+| 81.8B | **+0.03** | +0.04 | **+0.05** |
+| 299.9B | +0.86 | +0.58 | +0.14 |
+
+**The left branch.** The most fragile point in a model's life is the start of
+it. At 2.1B tokens the 1.4b model loses 4.49 nats at SF7, nineteen times its
+own minimum, and 1.08 nats even at SF8. Fragility then falls by more than an
+order of magnitude within the first 17B tokens. Early weights have not yet
+settled into the scale the trained network uses, so a fixed grid clips and
+rounds a much larger fraction of them.
+
+**The right branch.** The rise is concentrated in the final two checkpoints,
+steps 78000 and 143000 of 143000, which is exactly where Pythia's cosine
+schedule decays the learning rate to zero. Measuring each model against its
+own minimum rather than against the others:
+
+| model | final D/N | min SF7 | final SF7 | amplification |
+| --- | --- | --- | --- | --- |
+| 160m | 3528 tok/param | +0.13 | +3.16 | 25x |
+| 410m | 993 tok/param | +0.17 | +1.70 | 10x |
+| 1.4b | 248 tok/param | +0.24 | +0.69 | 2.9x |
+
+The amplification is ordered by tokens-per-parameter. The absolute penalty is
+not: the 1.4b model at 248 tok/param is worse than the 160m at 197, so D/N does
+not collapse the curves and is not by itself the governing variable. What it
+orders is how far a model's fragility is amplified by the end of its own
+schedule.
+
+This is the same direction as the data-dependence result of Kumar et al.
+(2024), measured on an independent format, but it locates the effect more
+precisely: it is not that training tokens steadily degrade quantizability, it
+is that the two ends of a training run are fragile and the middle is not.
+
+Converting that into the currency that matters, the cheapest precision that
+holds the penalty under 0.1 nats, interpolated across the tested grid:
+
+| model | at its best checkpoint | at its final checkpoint | cost of over-training |
+| --- | --- | --- | --- |
+| 160m | 7.2 bits | 9.7 bits | 2.5 bits |
+| 410m | 7.3 bits | 9.4 bits | 2.1 bits |
+| 1.4b | 7.5 bits | 8.2 bits | 0.7 bits |
+
+Training a 160m model to 300B tokens buys lower FP16 loss and costs two and a
+half bits of deployable precision.
+
+![D/N law](benchmarks/figures/lab_exp2_dn_law.png)
+
+**Practical consequence.** The worst checkpoint to quantize is the one that
+ships. The same model taken from the middle of its schedule tolerates PTQ 3x
+to 25x better, with the gap widening the further past compute-optimal the model
+is trained.
+
+**Caveat.** Learning-rate decay and over-training are confounded along a single
+training run: both advance together, and nothing here separates them. Tier E
+(3.4) varies D/N with each run completing its own schedule, which holds decay
+fixed while D/N moves, but it does so under QAT on a 5M model rather than PTQ
+on Pythia. A clean separation needs Pythia-scale runs with the schedule
+truncated at matched token counts, which was not affordable here.
 
 ![LM tiers](benchmarks/figures/scaling_ab_lm.png)
 
@@ -290,7 +353,133 @@ with a hypothesis attached, not a mechanism.
 
 ---
 
-## 5. What is not established
+## 5. Follow-up experiments
+
+The four tiers established that scale placement, not precision, sets the floor.
+Seven follow-ups ask where the remaining precision actually goes. All run on
+CIFAR-100 with the channel normalisation of 2.3 unless stated otherwise, so the
+weights they report are exact SF grid values at inference.
+
+### 5.1 Activations, not weights, are the binding constraint
+
+Everything so far quantized weights only. Sweeping weight and activation
+precision jointly, 42 cells, best top-1:
+
+| w \ a | a2 | a3 | a4 | a6 | a8 | a16 | none |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SF2 | 24.0 | 41.7 | 51.1 | 57.3 | 57.3 | 57.6 | 57.9 |
+| SF3 | 30.7 | 46.1 | 55.7 | 61.3 | 61.1 | -- | 62.1 |
+| SF4 | 27.3 | 47.5 | 56.8 | 62.3 | 62.1 | 62.3 | -- |
+| SF6 | 24.3 | 47.3 | 57.0 | 62.1 | 62.3 | 62.6 | 62.9 |
+| SF8 | 27.6 | 48.3 | 57.0 | 62.1 | 62.5 | 63.0 | 62.3 |
+| SF16 | 23.1 | 48.0 | 57.1 | 62.2 | 62.5 | 62.8 | 62.9 |
+
+The two axes are not symmetric. Holding activations exact, weights saturate at
+SF3 and are fully converged by SF4: 62.1 at SF3 against 62.9 at SF16. Holding
+weights exact, activations need SF6: 48.0 at SF3, 57.1 at SF4, 62.2 at SF6.
+Below SF6 activations the weight precision stops mattering at all, because
+every row of the a3 column lands within 2 points of every other.
+
+The cause is clipping, not grid coarseness. The fraction of activations
+landing outside the SF representable bound falls from 2.0% at SF2 to 0.03% at
+SF16, and the curve is identical for every weight precision. Activations are
+one-sided and heavy-tailed after ReLU, so a symmetric fixed-range format spends
+half its codes on values that never occur and clips the tail that carries the
+signal. Weights, which are roughly symmetric and light-tailed, have no such
+problem.
+
+**The activation scale is absorbable too.** The sweep divides activations by a
+per-tensor EMA of their maximum before quantizing, which would be a scale
+factor inside the datapath if it had to be applied there. It does not. The
+activation entering a conv comes out of the preceding BatchNorm and ReLU, and
+ReLU is positively homogeneous, so for a scalar s > 0
+
+    ReLU(gamma.xhat + beta) / s  ==  ReLU((gamma/s).xhat + beta/s)
+
+and folding gamma' = gamma/s, beta' = beta/s makes the preceding norm emit
+already-scaled activations. The conv output is then scaled by 1/s, which the
+following BatchNorm absorbs exactly as it absorbs the weight channel scale of
+2.3. Only the first conv has no preceding norm, and there the scale folds into
+the input normalisation, which is preprocessing rather than datapath. Both
+operands reach the systolic array as exact SF grid values.
+
+**Consequence for hardware.** An SF datapath wants an asymmetric split: 3 to 4
+bits on the weight operand, 6 on the activation operand. A design that
+allocates both operands the same width is overspending on weights and
+underspending where the accuracy actually is.
+
+![activation precision](benchmarks/figures/lab_exp1_activation.png)
+
+### 5.2 Per-layer evidence for the scale-placement account
+
+Section 2.3 argued the collapse was a scale mismatch: Kaiming initialisation
+sets sigma = sqrt(2/fan_in), which shrinks as layers widen, while the SF grid
+stays fixed, so wide layers initialise entirely inside the first quantization
+bin. Measuring the dead fraction, weights with |w| < Delta/2, layer by layer
+at initialisation tests that directly.
+
+Dead weights at init, plain SF / with channel normalisation:
+
+| fan_in | SF3 | SF4 | SF5 | SF6 |
+| --- | --- | --- | --- | --- |
+| 16 | 52.7 / 12.1 | 26.0 / 6.1 | 13.7 / 3.3 | 6.2 / 2.1 |
+| 27 | 65.5 / 10.9 | 29.4 / 6.9 | 15.3 / 3.5 | 8.3 / 2.1 |
+| 32 | 71.4 / 11.6 | 34.5 / 5.2 | 16.9 / 2.4 | 8.3 / 1.1 |
+| 144 | 100.0 / 12.5 | 74.6 / 6.2 | 37.8 / 3.3 | 19.0 / 1.7 |
+| 288 | 100.0 / 12.5 | 100.0 / 6.4 | 53.3 / 3.2 | 26.6 / 1.7 |
+| 576 | 100.0 / 12.5 | 100.0 / 6.3 | 75.0 / 3.1 | 37.5 / 1.5 |
+
+Plain SF does exactly what the account predicts. At SF3 every layer with
+fan_in at or above 144 is 100% dead at initialisation: the network starts as
+an exactly zero function and no gradient can revive it, which is the collapse
+seen in 2.1 and nothing to do with representational capacity.
+
+Under normalisation the fan_in dependence vanishes. Every column is flat, and
+the remaining dead fraction depends only on precision, halving with each added
+bit: 12.5%, 6.3%, 3.2%, 1.6%. That is precisely what a fixed Delta/2 threshold
+on a fixed-shape distribution gives, and it is the signature of a format whose
+grid is now matched to the weights it has to hold.
+
+![per-layer profile](benchmarks/figures/lab_exp5_per_layer.png)
+
+### 5.3 Learning rate does not need retuning with precision
+
+An early observation in this study, never formalised: SF8 from random init
+diverged at the FP32 recipe's 4e-3 while SF16 tolerated it. If the usable step
+size is set by grid resolution, then eta*(p) ~ 2^p, and one fewer bit halves
+the usable learning rate. SF3 should then tolerate about 1/8000 of SF16's step.
+
+Sixty cells, six precisions crossed with ten learning rates spanning 1e-4 to
+6e-2, a 640x range:
+
+| | 1e-4 | 5e-4 | 2e-3 | 4e-3 | 8e-3 | 2e-2 | 6e-2 | best lr |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SF3 | 8.8 | 11.4 | 13.6 | 15.7 | **16.7** | 16.0 | 7.6 | 8e-3 |
+| SF4 | 12.1 | 19.2 | 26.4 | **29.6** | 29.6 | 25.1 | 6.2 | 4e-3 |
+| SF5 | 24.6 | 38.0 | **47.8** | 47.2 | 45.6 | 39.5 | 8.8 | 2e-3 |
+| SF6 | 26.8 | 43.3 | 46.7 | **48.4** | 46.6 | 41.0 | 10.9 | 4e-3 |
+| SF8 | 29.3 | 42.3 | 48.7 | **50.0** | 47.4 | 38.4 | 12.0 | 4e-3 |
+| SF16 | 29.8 | 42.2 | 48.2 | **49.8** | 46.6 | 38.4 | 10.6 | 4e-3 |
+
+**Not one cell in sixty diverged**, at any precision, anywhere in a 640x range
+of step size. The optimum sits at 4e-3 for SF4, SF6, SF8 and SF16 alike, and
+SF3's optimum is 8e-3, twice SF16's rather than a fraction of it. The curves
+differ in height, not in position.
+
+The hypothesis is refuted, not merely unconfirmed, over this range. The
+original SF8 divergence is better explained by the scale mismatch of 2.3, which
+was present in that run and is corrected here: once each channel is normalised
+the network no longer initialises near zero, and the fragility that looked like
+a step-size limit disappears with it.
+
+**Practical consequence.** Precision and learning rate can be tuned
+independently. A recipe developed at FP32 transfers to SF4 without a learning
+rate search, which removes the most expensive part of adopting a low-precision
+format.
+
+![lr law](benchmarks/figures/lab_exp6_lr_law.png)
+
+## 6. What is not established
 
 - **The width exponent.** +1.12 bits over 16x width is solid; a single exponent
   is not. The integer precision grid cannot resolve p0 differences below ~1 bit,
@@ -315,7 +504,7 @@ with a hypothesis attached, not a mechanism.
 
 ---
 
-## 6. Method notes
+## 7. Method notes
 
 **GPU selection was measured, not assumed** (`modal/modal_profile.py`). Cost per
 unit of work, not throughput, decides: an L40S is best value for the CNN sweep
@@ -345,7 +534,7 @@ history, the dead-weight fraction, and the coverage fraction for every run.
 
 ---
 
-## 7. Files
+## 8. Files
 
 ```
 benchmarks/
@@ -354,6 +543,23 @@ benchmarks/
   modal/modal_scaling_b.py     tier B, PTQ over Pythia + checkpoints
   modal/modal_scaling_c.py     tier C, width sweep + channel normalisation
   modal/modal_scaling_d.py     tier D, transformer scale absorption
+  lab/exp1_act.py              weight/activation precision grid; also the
+                               model and loader for experiments 4, 6 and 7
+  lab/exp2_dn.py               PTQ over Pythia checkpoints, 7 x 7 grid
+  lab/exp3_reg.py              precision as regulariser, across D/N
+  lab/exp5_alloc.py            per-layer dead-weight profile
+  lab/exp6_lr.py               (precision, learning rate) stability grid
+  lab/README.md                what each experiment asks, and how to run it
   analyze_scaling.py           logistic fit of p0, width law
-  make_scaling_figures.py      the three figures above
+  make_scaling_figures.py      the four-tier figures
+  make_lab_figures.py          the follow-up figures
+  results/                     every raw result, one JSONL per experiment
+```
+
+Regenerating every figure from the raw results:
+
+```bash
+cd benchmarks
+python make_scaling_figures.py --results-dir results --out figures/
+python make_lab_figures.py     --results-dir results --out figures/
 ```
