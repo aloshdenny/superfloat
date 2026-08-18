@@ -363,13 +363,13 @@ weights they report are exact SF grid values at inference.
 ### 5.1 Activations, not weights, are the binding constraint
 
 Everything so far quantized weights only. Sweeping weight and activation
-precision jointly, 42 cells, best top-1:
+precision jointly over the full 42-cell grid, best top-1:
 
 | w \ a | a2 | a3 | a4 | a6 | a8 | a16 | none |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | SF2 | 24.0 | 41.7 | 51.1 | 57.3 | 57.3 | 57.6 | 57.9 |
-| SF3 | 30.7 | 46.1 | 55.7 | 61.3 | 61.1 | -- | 62.1 |
-| SF4 | 27.3 | 47.5 | 56.8 | 62.3 | 62.1 | 62.3 | -- |
+| SF3 | 30.7 | 46.1 | 55.7 | 61.3 | 61.1 | 61.4 | 62.1 |
+| SF4 | 27.3 | 47.5 | 56.8 | 62.3 | 62.1 | 62.3 | 62.7 |
 | SF6 | 24.3 | 47.3 | 57.0 | 62.1 | 62.3 | 62.6 | 62.9 |
 | SF8 | 27.6 | 48.3 | 57.0 | 62.1 | 62.5 | 63.0 | 62.3 |
 | SF16 | 23.1 | 48.0 | 57.1 | 62.2 | 62.5 | 62.8 | 62.9 |
@@ -493,8 +493,19 @@ format.
   at one architecture and one size.
 - **PTQ under scale absorption** was never run. Given SF4 PTQ destroys every
   model tested, it is the obvious next experiment.
-- **Activation quantization** is out of scope throughout; the V-JEPA
-  measurement in [SUPERFLOAT_RESULTS.md](SUPERFLOAT_RESULTS.md) shows why.
+- **Activation quantization** is out of scope for the four tiers; 5.1 measures
+  it directly on CIFAR-100, and the V-JEPA measurement in
+  [SUPERFLOAT_RESULTS.md](SUPERFLOAT_RESULTS.md) shows why it matters.
+- **The follow-ups of 5.1, 5.2, 5.3 are CIFAR-100 ResNets only.** The
+  weight/activation asymmetry is the one most likely to be architecture
+  specific: it rests on activations being one-sided and heavy-tailed after
+  ReLU, and a transformer's post-GELU and residual-stream activations are
+  differently shaped. It is untested there.
+- **The learning-rate result is measured on 12-epoch runs.** Short runs are
+  enough to expose divergence, which is what was being looked for, but a
+  configuration that survives 12 epochs at 6e-2 could still fail over 60. The
+  claim is that no precision-dependent stability boundary exists in this
+  window, not that any of these learning rates is a good idea.
 - **Half-Chinchilla token budget** (10 tokens/param). Relative degradation at
   matched (N, D) is unaffected, but absolute losses are not compute-optimal.
 - **Embedding init** uses PyTorch's default N(0,1) rather than GPT-2's

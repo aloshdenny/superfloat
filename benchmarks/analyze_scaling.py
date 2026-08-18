@@ -55,17 +55,36 @@ def logistic(p, A, k, p0):
     return A / (1.0 + np.exp(-k * (p - p0)))
 
 
+def _rows(results_dir, tier):
+    """Tier records from `scaling_<tier>.jsonl` or a runs_scaling_<tier>/ dir."""
+    arch = os.path.join(results_dir, f"scaling_{tier}.jsonl")
+    if os.path.exists(arch):
+        with open(arch) as f:
+            return [json.loads(l) for l in f if l.strip()]
+    out = []
+    for fn in glob.glob(os.path.join(results_dir, f"runs_scaling_{tier}", "*.json")):
+        if "_fp16head" in fn:
+            continue
+        out.append(json.load(open(fn)))
+    return out
+
+
 def load_c(results_dir):
     """Tier C records, keyed (width_mult, bits) -> list over seeds."""
     by = collections.defaultdict(list)
-    for f in glob.glob(os.path.join(results_dir, "runs_scaling_c", "*.json")):
-        r = json.load(open(f))
+    for r in _rows(results_dir, "c"):
         # smoke runs share tags with real ones; length is the only honest check
         if len(r.get("history", [])) < MIN_EPOCHS:
             continue
         # head-quantization controls are a different condition and must not be
         # pooled into the main fit
         if r.get("quantize_head"):
+            continue
+        # nor may the channel-normalised arm.  It was added to tier C after
+        # this analysis was written, and pooling it flattens the knee it is
+        # trying to locate: normalised runs train at SF2, so the logistic sees
+        # no collapse and the fitted slope drops from +0.29 to +0.14.
+        if r.get("channel_norm"):
             continue
         by[(r["width_mult"], r["bits"])].append(r)
     return by
@@ -156,12 +175,7 @@ def figure(by, fits, slope, intercept, se, outdir):
 # ------------------------------------------------------- tiers A and B -----
 def load_ab(results_dir, tier):
     """Tier A (QAT) or B (PTQ) records. bits=0 is that row's control."""
-    out = []
-    for f in glob.glob(os.path.join(results_dir, f"runs_scaling_{tier}", "*.json")):
-        if "_fp16head" in f:          # coverage control, not part of the sweep
-            continue
-        out.append(json.load(open(f)))
-    return out
+    return _rows(results_dir, tier)   # "_fp16head" coverage controls dropped there
 
 
 def _penalty_table(rows, key_size, key_loss, step=None):

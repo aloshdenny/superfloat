@@ -156,21 +156,44 @@ def fig_dn(rows, out):
 
 
 def fig_reg(rows, out):
-    """exp3: does coarse-is-better die as tokens-per-parameter grows?"""
+    """exp3: does coarse-is-better die as tokens-per-parameter grows?
+
+    Tier D found lower precision beating higher under scale absorption. If that
+    inversion is a regularisation effect it should be a small-data artefact:
+    give the model more tokens per parameter and the coarser grid should lose
+    its advantage and then fall behind.
+    """
     if not rows: return None
     g = collections.defaultdict(dict)
     for r in rows: g[r["tpp"]][r["bits"]] = r["final_val_loss"]
-    fig, ax = plt.subplots(figsize=(7.5, 5))
+    fig, ax = plt.subplots(1, 2, figsize=(13.6, 4.8))
     tpps = sorted(g)
+
+    # (a) absolute loss -- needs no control, so it is readable while the sweep
+    # is still filling in
+    for i, b in enumerate([0, 2, 3, 4, 6]):
+        pts = [(t, g[t][b]) for t in tpps if b in g[t]]
+        if pts:
+            ax[0].plot(*zip(*pts), marker="o", ms=6, lw=1.8, color=C[i],
+                       label="FP32" if b == 0 else f"SF{b}")
+    ax[0].set_xscale("log"); ax[0].set_xlabel("tokens per parameter")
+    ax[0].set_ylabel("final val loss (nats)")
+    ax[0].set_title("(a) loss vs data, one curve per precision", fontsize=10)
+    ax[0].legend(fontsize=9); ax[0].grid(alpha=0.3)
+
+    # (b) penalty against each cell's own FP32 control
     for i, b in enumerate([2, 3, 4, 6]):
         pts = [(t, g[t][b] - g[t][0]) for t in tpps if b in g[t] and 0 in g[t]]
-        if pts: ax.plot(*zip(*pts), marker="o", ms=6, lw=1.8, color=C[i], label=f"SF{b}")
-    ax.axhline(0, color="k", lw=0.8, ls=":")
-    ax.set_xscale("log"); ax.set_xlabel("tokens per parameter")
-    ax.set_ylabel("penalty vs FP32 control (nats)")
-    ax.set_title("If coarse-is-better is regularisation, the SF2 line\n"
-                 "should cross above SF4 as data grows", fontsize=10)
-    ax.legend(fontsize=9); ax.grid(alpha=0.3)
+        if pts:
+            ax[1].plot(*zip(*pts), marker="o", ms=6, lw=1.8, color=C[i],
+                       label=f"SF{b}")
+    ax[1].axhline(0, color="k", lw=0.8, ls=":")
+    ax[1].set_xscale("log"); ax[1].set_xlabel("tokens per parameter")
+    ax[1].set_ylabel("penalty vs FP32 control (nats)")
+    ax[1].set_title("(b) if the inversion is regularisation, the gaps\n"
+                    "should widen as data grows", fontsize=10)
+    ax[1].legend(fontsize=9); ax[1].grid(alpha=0.3)
+
     fig.tight_layout(); p = os.path.join(out, "lab_exp3_regularisation.png")
     fig.savefig(p, dpi=180); plt.close(fig); return p
 
@@ -277,17 +300,74 @@ def fig_lr(rows, out):
     fig.savefig(p, dpi=180); plt.close(fig); return p
 
 
+def fig_plain(rows4, rows7, out):
+    """exp7 against exp4: the same depth sweep with and without normalisation.
+
+    exp4 runs the channel-normalised condition, so on its own it cannot speak
+    to the paper's SF16@ResNet-56 seed spread of 12.0 points, which came from a
+    pipeline that had no per-channel scale. exp7 reruns the two precisions that
+    spread was reported at, without normalisation, at three seeds.
+    """
+    if not rows7: return None
+    def bucket(rows):
+        g = collections.defaultdict(list)
+        for r in rows:
+            g[(r["depth"], r["bits_w"])].append(r["best_acc"])
+        return g
+    g4, g7 = bucket(rows4), bucket(rows7)
+    B = sorted({b for _, b in g7})
+    D = sorted({d for d, _ in g7})
+    fig, ax = plt.subplots(1, 2, figsize=(13.6, 4.8))
+
+    for i, b in enumerate(B):
+        for g, ls, lab in ((g4, "-", "+ channel norm"), (g7, "--", "plain SF")):
+            xs = [d for d in D if (d, b) in g]
+            if not xs:
+                continue
+            ys = [np.mean(g[(d, b)]) for d in xs]
+            es = [np.ptp(g[(d, b)]) / 2 if len(g[(d, b)]) > 1 else 0 for d in xs]
+            ax[0].errorbar(xs, ys, yerr=es, marker="o", ms=5, lw=1.8, ls=ls,
+                           capsize=3, color=C[i % len(C)], label=f"SF{b}, {lab}")
+    ax[0].set_xlabel("depth"); ax[0].set_ylabel("best top-1 (%)")
+    ax[0].set_title("(a) accuracy vs depth, with and without normalisation",
+                    fontsize=10)
+    ax[0].legend(fontsize=8); ax[0].grid(alpha=0.3)
+
+    for i, b in enumerate(B):
+        for g, ls, lab in ((g4, "-", "+ channel norm"), (g7, "--", "plain SF")):
+            xs = [d for d in D if (d, b) in g and len(g[(d, b)]) > 1]
+            if not xs:
+                continue
+            ax[1].plot(xs, [np.ptp(g[(d, b)]) for d in xs], marker="o", ms=5,
+                       lw=1.8, ls=ls, color=C[i % len(C)], label=f"SF{b}, {lab}")
+    ax[1].axhline(12.0, color="#d62728", lw=1.6, ls=":")
+    ax[1].text(0.02, 12.3, "spread reported in the paper (SF16 @ ResNet-56)",
+               fontsize=8, color="#d62728", transform=ax[1].get_yaxis_transform())
+    ax[1].set_xlabel("depth"); ax[1].set_ylabel("seed spread (pp)")
+    ax[1].set_title("(b) does the reported instability reproduce?", fontsize=10)
+    ax[1].legend(fontsize=8, loc="upper left"); ax[1].grid(alpha=0.3)
+
+    fig.tight_layout(); p = os.path.join(out, "lab_exp7_plain_depth.png")
+    fig.savefig(p, dpi=180); plt.close(fig); return p
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-dir", default="."); ap.add_argument("--out", default="figures")
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
     made = []
+    got = {}
     for exp, fn in (("exp1", fig_act), ("exp2", fig_dn), ("exp3", fig_reg),
                     ("exp4", fig_depth), ("exp5_profile", fig_alloc), ("exp6", fig_lr)):
         rows = load(a.results_dir, exp)
+        got[exp] = rows
         print(f"  {exp}: {len(rows)} rows")
         p = fn(rows, a.out)
         if p: made.append(p)
+    rows7 = load(a.results_dir, "exp7")
+    print(f"  exp7: {len(rows7)} rows")
+    p = fig_plain(got.get("exp4", []), rows7, a.out)
+    if p: made.append(p)
     for p in made: print("  " + p)
 
 
