@@ -50,6 +50,14 @@ parameters already fall inside `[−1, 1]` — 0 of 53.6M YOLO11x weights fall
 outside SF16's range, and only 15 outside SF4's tighter ±0.875. The exponent is
 paying for range that trained weights do not use.
 
+> **This does not generalise to every trained network, and the exception is
+> load-bearing.** SmolLM2-360M has weights reaching `|w| = 7.47`. Only ~0.01%
+> exceed the bound, but they are the largest-magnitude weights in the model and
+> clipping them destroys it **even at SF16**, where precision is plainly not
+> the issue. Any layer whose weights are quantized without a per-channel scale
+> must have its range checked against the actual checkpoint rather than assumed.
+> See [TOOL_USE_QAT.md](TOOL_USE_QAT.md) section 2.
+
 ![Float vs Superfloat](assets/results/FloatvsSuperfloat.jpg)
 
 ---
@@ -66,6 +74,10 @@ A second study asks how the usable precision moves with model width, depth,
 parameter count and training tokens: [SCALING_LAWS.md](SCALING_LAWS.md), 878
 archived runs across four tiers and eight follow-ups. Its result reframes
 everything below.
+
+A third asks what it takes to run a tool-calling model on SF-only hardware:
+[TOOL_USE_QAT.md](TOOL_USE_QAT.md). Short answer for SF8, no training at all --
+but it also corrects the range claim made further down this page.
 
 ![Validation trajectories](benchmarks/figures/format_overlay.png)
 

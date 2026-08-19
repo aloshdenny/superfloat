@@ -21,6 +21,14 @@ silent bug visible, and several were caught that way.
 | 7 | `exp1_act.py --no-chan-norm --depth` | does the paper's ResNet-56 instability reproduce? | no: 0.94 pp against 12.0 |
 | 8 | `exp8_tierd_seeds.py` | does 4.1's inversion reproduce, with records kept? | yes: every cell within 0.016 nats |
 
+Two further scripts target tool-use models rather than the scaling study; see
+[TOOL_USE_QAT.md](../../TOOL_USE_QAT.md).
+
+| script | question | answer |
+| --- | --- | --- |
+| `stage0_toolqat.py` | does SF survive RMSNorm/SwiGLU/GQA from scratch? | SF8 free, SF4 usable under absorption |
+| `smol_qat.py` | can a trained checkpoint be moved onto the SF grid? | SF8 needs no training at all |
+
 ## Running
 
 `exp1_act.py` supplies the CIFAR-100 model and data loader that experiments 4,
