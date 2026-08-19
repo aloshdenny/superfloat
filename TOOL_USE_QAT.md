@@ -168,7 +168,40 @@ than running at the edge.
 
 ---
 
-## 6. What this means for a build
+## 6. Capability, not loss: BFCL
+
+Everything above is validation loss. A model can lose 0.1 nats and still call
+the right function every time, or gain nothing and start emitting malformed
+JSON. Qwen2.5-1.5B-Instruct on the Berkeley Function Calling Leaderboard, 840
+prompts per arm, greedy decode, weights-only SF, scored by AST match:
+
+| arm | simple | multiple | irrelevance | call rate |
+| --- | --- | --- | --- | --- |
+| bf16 | 83.5 +/-3.6 | 80.0 +/-5.5 | 72.1 +/-5.7 | 99.5% |
+| **SF8 PTQ** | **83.2 +/-3.7** | **81.0 +/-5.4** | **76.2 +/-5.4** | 97.5% |
+| SF6 PTQ | 0.0 | 0.5 | 100.0 | 1.2% |
+| SF4 PTQ | 0.0 | 0.0 | 100.0 | 0.0% |
+
+SF8 differs from bf16 by -0.2, +1.0 and +4.2 points, all inside the roughly
++/-5pp confidence interval on the difference. **Post-training quantization to
+SF8 costs no measurable tool-use accuracy.**
+
+**The 100% irrelevance figures are an artifact and must not be quoted.**
+Irrelevance is scored as correctly declining to call a function, so a model
+that has stopped emitting tool calls passes every case for free. SF6 and SF4
+call on 1.2% and 0.0% of prompts respectively: they are not cautious, they are
+broken. Aggregating the three categories would report them at about 28.7%,
+which is why this table gives categories separately with the call rate beside
+them. A BFCL number without a call rate is not interpretable.
+
+**Loss was a valid screen.** SF8 PTQ at 2.4493 against bf16's 2.4680 predicted
+intact capability; SF6 PTQ at 7.17 predicted the collapse. Loss costs about a
+hundredth of a benchmark run and located the cliff correctly, which is worth
+knowing before paying for evaluation sweeps.
+
+---
+
+## 7. What this means for a build
 
 - **Want SF8?** Quantize an existing tool-capable checkpoint. No training, no
   GPU-weeks, no new credit. Scale every matmul, including `o_proj` and
@@ -186,7 +219,7 @@ quantize-in-forward. PTQ costs nothing, since there is no forward to pay for.
 
 ---
 
-## 7. What is not established
+## 8. What is not established
 
 - **Single seed** on every SmolLM2 run and on the SF2/SF3/SF4 arms of section
   3. The two-seed arms give a spread of 0.011 to 0.027, so differences below
@@ -194,10 +227,15 @@ quantize-in-forward. PTQ costs nothing, since there is no forward to pay for.
 - **The fold-back for `o_proj`/`down_proj`** is derived in section 2 but not
   verified in code. Every other absorption path in this document is checked to
   0 off-grid weights; that one is not yet.
-- **Loss is not capability.** Nothing here measures whether the model calls the
-  right function with the right arguments. BFCL, tau-bench or API-Bank would,
-  and none were run. A 0.5 nat improvement in tool loss is not a claim about
-  tool-use accuracy.
+- **SF6 capability after QAT is untested.** Section 4 shows SF6 QAT recovers
+  loss to near-control; section 6 shows SF6 *without* QAT scores zero on BFCL.
+  Whether QAT restores capability as well as loss is the single most important
+  open question here, and it was not run.
+- **BFCL was run on Qwen2.5-1.5B-Instruct, not on the models of sections 3-4.**
+  It measures whether SF preserves capability a model already has. It does not
+  measure the SmolLM2 continued-pretraining runs.
+- **Only three AST-checkable categories.** No multi-turn, no live, no
+  executable categories, and no tau-bench or API-Bank.
 - **360M is not 1B.** Tier A found the QAT penalty grows with model size below
   SF6, so the SF6 result in particular may not hold at the scale a real tool
   model needs.
@@ -210,7 +248,7 @@ quantize-in-forward. PTQ costs nothing, since there is no forward to pay for.
 
 ---
 
-## 8. Files
+## 9. Files
 
 ```
 benchmarks/lab/
@@ -220,6 +258,8 @@ benchmarks/results/
   stage0.jsonl        14 runs, section 3
   smol_ptq.jsonl      2 PTQ sweeps, ln and ln_all, section 1 and 2
   smol_qat.jsonl      2 continued-pretraining runs, section 4
+  bfcl.jsonl          4 benchmark arms, section 6
+benchmarks/lab/bfcl_eval.py   BFCL v3 runner and AST matcher
 ```
 
 ```bash
@@ -229,4 +269,5 @@ python stage0_toolqat.py --size 25m --bits 8 --mode ln --seed 0
 python smol_qat.py --prepare 250000000
 python smol_qat.py --ptq --mode ln_all
 python smol_qat.py --bits 6 --mode ln_all --tokens 60000000
+python bfcl_eval.py --bits 8 --mode ln_all --categories simple,multiple,irrelevance
 ```
