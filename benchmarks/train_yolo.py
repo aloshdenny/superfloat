@@ -129,7 +129,7 @@ def attach_superfloat(yolo, bits, quantize_activations=True, verbose=True):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--format", required=True,
-                   choices=["sf16", "sf8", "sf4", "fp32", "fp16"])
+                   help="fp32, fp16, or sfx with x in 2..16")
     p.add_argument("--cfg", required=True,
                    help="architecture, e.g. yolo11x.yaml / yolov8x-obb.yaml")
     p.add_argument("--init", default="random", choices=["random", "pretrained"],
@@ -153,10 +153,13 @@ def main():
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device", default="", help="0 | mps | cpu (default: auto)")
     args = p.parse_args()
 
     disable_tf32()
-    if torch.cuda.is_available():
+    if args.device:
+        device = args.device
+    elif torch.cuda.is_available():
         device = "0"
     elif torch.backends.mps.is_available():
         device = "mps"
