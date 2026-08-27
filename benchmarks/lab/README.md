@@ -28,6 +28,23 @@ Two further scripts target tool-use models rather than the scaling study; see
 | --- | --- | --- |
 | `stage0_toolqat.py` | does SF survive RMSNorm/SwiGLU/GQA from scratch? | SF8 free, SF4 usable under absorption |
 | `smol_qat.py` | can a trained checkpoint be moved onto the SF grid? | SF8 needs no training at all |
+| `bfcl_eval.py` | does PTQ preserve BFCL, and does that hold at scale? | SF8 free from 1.7B; SF6 cliff is small models |
+| `train_1b.py` | does from-scratch SF8 QAT hold at Llama-3.2-1B? | in flight; no archive yet |
+
+A pure-SF datapath, not weights-only: [PURE_SF.md](../../PURE_SF.md).
+
+| script | question | answer |
+| --- | --- | --- |
+| `psd.py` | what scale granularity keeps saturate-every-register SF8 alive? | per-token; tensor/channel do not |
+
+Domain evals: [DOMAIN.md](../../DOMAIN.md).
+
+| script | question | answer |
+| --- | --- | --- |
+| `vision_ptq.py` | YOLO-seg and box-prompt SAM under weights-only SF? | YOLO mask mAP 0.40 → 0.0; SAM IoU ~0.46 |
+| `code_xlat.py` | does C→C++ still compile under SF PTQ? | runner fixed; no number yet |
+| `sam_scratch.py` | from-scratch box→mask QAT, TinyBoxSeg on coco128-seg | no archive yet |
+| `sam_pretrain.py` | same idea, BoxSeg-S on COCO train2017 | no archive yet |
 
 ## Running
 
@@ -44,6 +61,9 @@ python exp5_alloc.py --bits 4
 python exp6_lr.py   --bits 8 --lr 4e-3
 python exp8_tierd_seeds.py --prepare       # same corpus as exp3
 python exp8_tierd_seeds.py --size 11m --tpp 10 --bits 2 --seed 1
+python bfcl_eval.py --model Qwen/Qwen3-1.7B --bits 8 --mode ln_all
+python vision_ptq.py --task both --bits 8
+python psd.py --ptq
 ```
 
 ## Concurrency

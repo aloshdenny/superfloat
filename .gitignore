@@ -4,3 +4,6 @@ models--*
 frontend/node_modules/
 *.exe
 __pycache__/
+.cursor/
+*.pt
+benchmarks/results/domain/

@@ -76,8 +76,18 @@ archived runs across four tiers and eight follow-ups. Its result reframes
 everything below.
 
 A third asks what it takes to run a tool-calling model on SF-only hardware:
-[TOOL_USE_QAT.md](TOOL_USE_QAT.md). Short answer for SF8, no training at all --
-but it also corrects the range claim made further down this page.
+[TOOL_USE_QAT.md](TOOL_USE_QAT.md). Short answer for SF8, no training at all,
+and the 1.5B BFCL result holds from 1.7B to 8B. It also corrects the range
+claim made further down this page.
+
+A fourth asks whether those numbers survive a *pure* SF datapath, saturating
+every register the way the accelerator does, rather than quantizing weights
+only: [PURE_SF.md](PURE_SF.md). Per-token scale is the first granularity that
+keeps the model alive.
+
+A fifth is domain evals beyond tool-call loss: known-class segmentation,
+promptable SAM, and a public C→C++ compile-pass proxy.
+[DOMAIN.md](DOMAIN.md). YOLO-seg PTQ collapses; box-prompt SAM does not.
 
 ![Validation trajectories](benchmarks/figures/format_overlay.png)
 
@@ -383,6 +393,9 @@ assets/results/            weight-distribution studies, architecture figures
 docs/paper/                TPAMI manuscript, anonymized main doc and title page
 SUPERFLOAT_RESULTS.md      evaluation tables and failure-mode analyses
 SCALING_LAWS.md            the scaling study, sections 1-8
+TOOL_USE_QAT.md            tool-calling PTQ/QAT, including BFCL at 0.6B–8B
+PURE_SF.md                 saturate-every-register datapath, not weights-only
+DOMAIN.md                  YOLO-seg, box-prompt SAM, C→C++ proxy
 ```
 
 ---
