@@ -28,7 +28,16 @@ from smol_qat import install, fold          # same surgery, Qwen2 is Llama-shape
 from superfloat import disable_tf32
 
 REPO = "gorilla-llm/Berkeley-Function-Calling-Leaderboard"
-OUT = os.environ.get("BFCL_OUT", "/workspace/results")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.environ.get("BFCL_OUT", os.path.join(_HERE, "..", "results", "domain"))
+
+
+def pick_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def load_category(cat):
@@ -54,6 +63,14 @@ def to_openai_tools(funcs):
 
 
 CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+
+
+def render_prompt(tok, msgs, tools):
+    kw = dict(tools=tools, tokenize=False, add_generation_prompt=True)
+    try:
+        return tok.apply_chat_template(msgs, enable_thinking=False, **kw)
+    except TypeError:
+        return tok.apply_chat_template(msgs, **kw)
 
 
 def parse_calls(text):
@@ -123,18 +140,17 @@ def ast_match(calls, ground_truth):
 
 
 @torch.no_grad()
-def run(model, tok, rows, answers, cat, batch, max_new, dump=None):
+def run(model, tok, rows, answers, cat, batch, max_new, max_len=3072, dump=None):
     hits = total = 0; called = 0; records = []
     for i in range(0, len(rows), batch):
         chunk = rows[i:i+batch]
         prompts = []
         for r in chunk:
             msgs = r["question"][0] if isinstance(r["question"][0], list) else r["question"]
-            prompts.append(tok.apply_chat_template(
-                msgs, tools=to_openai_tools(r["function"]),
-                tokenize=False, add_generation_prompt=True))
+            prompts.append(render_prompt(tok, msgs, to_openai_tools(r["function"])))
         enc = tok(prompts, return_tensors="pt", padding=True,
-                  truncation=True, max_length=3072).to(model.device)
+                  truncation=True, max_length=max_len)
+        enc = {k: v.to(model.device) for k, v in enc.items()}
         gen = model.generate(**enc, max_new_tokens=max_new, do_sample=False,
                              pad_token_id=tok.pad_token_id or tok.eos_token_id)
         outs = tok.batch_decode(gen[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
@@ -147,36 +163,60 @@ def run(model, tok, rows, answers, cat, batch, max_new, dump=None):
             hits += ok; total += 1; called += (len(calls) > 0)
             if dump is not None and len(records) < 5:
                 records.append({"id": r["id"], "ok": bool(ok), "out": text[:300]})
+        if total % 40 == 0 or i + batch >= len(rows):
+            print(f"  {cat} {total}/{len(rows)} acc={hits/max(total,1):.3f}", flush=True)
     return hits, total, called, records
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
+    ap.add_argument("--model", default="Qwen/Qwen3-1.7B")
     ap.add_argument("--bits", type=int, default=0, help="0 = bf16 reference")
     ap.add_argument("--mode", default="ln_all", choices=["plain", "ln", "ln_all"])
     ap.add_argument("--categories", default="simple,multiple,irrelevance")
-    ap.add_argument("--batch", type=int, default=16)
+    ap.add_argument("--batch", type=int, default=0)
     ap.add_argument("--max-new", type=int, default=160)
+    ap.add_argument("--max-len", type=int, default=3072)
     ap.add_argument("--limit", type=int, default=0)
     a = ap.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     disable_tf32()
+    device = pick_device()
+    if a.batch <= 0:
+        a.batch = 8 if device.type == "cuda" else 1
+        name = a.model.lower()
+        if any(s in name for s in ("8b", "7b", "9b")):
+            a.batch = min(a.batch, 4)
+    print(f"device={device} batch={a.batch} out={OUT}", flush=True)
     tok = AutoTokenizer.from_pretrained(a.model, padding_side="left")
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.bfloat16).cuda().eval()
-
     nq = 0
     if a.bits:
-        # quantize in fp32 so the grid is exact, then hand back bf16 weights,
-        # which hold SF8 and coarser without loss (verified numerically)
-        model = model.float()
+        # 8B bf16 already fills a 24 GB card. Upcasting in-place OOMs.
+        # Load+quantize on CPU (8B fp32 ~32 GB; this pod has 54), then bf16 to GPU.
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                a.model, torch_dtype=torch.float32).eval()
+        except TypeError:
+            model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.float32).eval()
+        print(f"loaded {a.model} on cpu for PTQ", flush=True)
         nq = install(model, a.bits, a.mode)
         nf, worst = fold(model)
-        model = model.bfloat16()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        model = model.bfloat16().to(device)
         print(f"quantized {nq} matmuls, folded {nf}, max off-grid {worst:.2e}", flush=True)
+    else:
+        dtype = torch.bfloat16 if device.type != "cpu" else torch.float32
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                a.model, torch_dtype=dtype).to(device).eval()
+        except TypeError:
+            model = AutoModelForCausalLM.from_pretrained(
+                a.model, dtype=dtype).to(device).eval()
+        print(f"loaded {a.model} on {device}", flush=True)
 
     tag = f"bfcl_{a.model.split('/')[-1]}_" + ("bf16" if not a.bits else f"sf{a.bits}_{a.mode}")
     os.makedirs(OUT, exist_ok=True)
@@ -184,7 +224,8 @@ def main():
     for cat in a.categories.split(","):
         rows, ans = load_category(cat)
         if a.limit: rows = rows[:a.limit]
-        h, t, c, samples = run(model, tok, rows, ans, cat, a.batch, a.max_new, dump=True)
+        h, t, c, samples = run(model, tok, rows, ans, cat, a.batch, a.max_new,
+                               max_len=a.max_len, dump=True)
         res[cat] = {"correct": h, "total": t, "acc": h/t, "call_rate": c/t, "samples": samples}
         print(f"[{tag}] {cat:12s} {h:4d}/{t:4d} = {100*h/t:5.1f}%   "
               f"called on {100*c/t:5.1f}% of prompts", flush=True)

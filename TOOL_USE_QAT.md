@@ -1,7 +1,8 @@
 # SuperFloat for tool-use models
 
 A feasibility study for pretraining or converting a tool-calling model to run
-on SF-only hardware. 18 runs, all archived under `benchmarks/results`.
+on SF-only hardware. 18 loss runs and 16 BFCL arms, all archived under
+`benchmarks/results`.
 
 The scaling study established that scale placement, not precision, sets the
 usable floor. Everything there used vanilla GPT-2 blocks and models trained
@@ -201,13 +202,53 @@ knowing before paying for evaluation sweeps.
 
 ---
 
+## 6b. One number is a trap: Qwen3 0.6B–8B
+
+Section 6 is Qwen2.5-1.5B. Section 8 listed that as a limitation: 360M is not
+1B, and a single 1.5B row does not say whether the SF8 result survives scale
+or whether the SF6 cliff is a small-model artefact. Same 840 prompts, same
+AST matcher, same `ln_all` recipe, thinking off (`enable_thinking=False`),
+Qwen3 dense 0.6B / 1.7B / 4B / 8B. Qwen3.5 was not run: it is a
+linear-attention plus vision hybrid, and this surgery does not apply.
+
+Overall accuracy, 840 prompts. Call rates sit in the jsonl; they stay high
+except where noted.
+
+| model | bf16 | SF8 PTQ | SF6 PTQ |
+| --- | --- | --- | --- |
+| Qwen3-0.6B | 81.9% | 78.7% | 27.3% |
+| Qwen3-1.7B | 88.7% | **88.6%** | 78.9% |
+| Qwen3-4B | 89.6% | **90.4%** | 62.9% |
+| Qwen3-8B | 91.3% | **90.2%** | **88.0%** |
+
+**SF8 is free once the model is not tiny.** From 1.7B up it is within a point
+of bf16, matching the 1.5B result. 0.6B pays −3.2 points, which is a small
+model being small, not the format falling over.
+
+**The SF6 cliff is the small models.** At 8B, SF6 holds at 88.0 against 91.3
+(−3.3 points) with call rates intact (simple 99.0%, multiple 97.5%). At 4B
+it is already a real hit (62.9, and simple call rate drops to 84%). At 0.6B
+it is 27.3%. That 0.6B failure is not the silent-model artefact from section
+6: simple still calls on 20.8% of prompts, but the arguments are garbage.
+The 1.5B SF6 run that scored ~0 with a 1.2% call rate was a model that had
+stopped emitting tools. These still try.
+
+4B SF8 at 90.4 against 89.6 is one seed and is not a claim that SF8 is
+better. 8B SF8 ran 105 minutes, SF6 113 minutes, on a 24 GB card after
+quantize-on-CPU then bf16-to-GPU; in-place `model.float()` OOMs.
+
+---
+
 ## 7. What this means for a build
 
 - **Want SF8?** Quantize an existing tool-capable checkpoint. No training, no
   GPU-weeks, no new credit. Scale every matmul, including `o_proj` and
-  `down_proj`.
-- **Want SF6?** Budget roughly 10M tokens of QAT from the checkpoint, not a
-  pretraining run. On a single RTX 4090 that is hours, not weeks.
+  `down_proj`. Do not quote a 0.6B number as the format's cost; from 1.7B
+  the PTQ result is free.
+- **Want SF6?** At 8B, PTQ already holds at −3.3 points. Below that, budget
+  roughly 10M tokens of QAT from the checkpoint, not a pretraining run — and
+  treat that QAT as untested on capability until section 8's item is closed.
+  On a single RTX 4090 that is hours, not weeks.
 - **Pretraining from scratch is the wrong instrument.** Measured throughput put
   a month of 4090 time at roughly 300M parameters on 9B tokens. The smallest
   models with credible tool calling saw three orders of magnitude more data,
@@ -228,17 +269,20 @@ quantize-in-forward. PTQ costs nothing, since there is no forward to pay for.
   verified in code. Every other absorption path in this document is checked to
   0 off-grid weights; that one is not yet.
 - **SF6 capability after QAT is untested.** Section 4 shows SF6 QAT recovers
-  loss to near-control; section 6 shows SF6 *without* QAT scores zero on BFCL.
-  Whether QAT restores capability as well as loss is the single most important
-  open question here, and it was not run.
-- **BFCL was run on Qwen2.5-1.5B-Instruct, not on the models of sections 3-4.**
-  It measures whether SF preserves capability a model already has. It does not
-  measure the SmolLM2 continued-pretraining runs.
+  loss to near-control; section 6 shows SF6 *without* QAT scores zero on BFCL
+  at 1.5B. Section 6b shows 8B SF6 PTQ already holds at −3.3 points, so the
+  QAT question is now "does it close the last few points on mid-size models",
+  not "does anything work at SF6". It was still not run.
+- **BFCL was run on Qwen2.5-1.5B-Instruct and on Qwen3 dense 0.6B–8B, not on
+  the SmolLM2 models of sections 3-4.** It measures whether SF preserves
+  capability a model already has. It does not measure the continued-
+  pretraining runs.
 - **Only three AST-checkable categories.** No multi-turn, no live, no
   executable categories, and no tau-bench or API-Bank.
-- **360M is not 1B.** Tier A found the QAT penalty grows with model size below
-  SF6, so the SF6 result in particular may not hold at the scale a real tool
-  model needs.
+- **PTQ scale is measured; QAT scale is not.** Section 6b closes the "one
+  1.5B number" gap for post-training quantization. From-scratch 1B QAT is
+  in flight on a home 4090 and has no archived val number yet. A matched
+  bf16 1B control has not been started.
 - **No 8K context run.** SmolLM2-360M supports 8192 positions natively and the
   runs here used 2048. Long-context behaviour under SF is untested.
 - **PTQ sweep eval noise.** The section 1 sweep drew different random batches
@@ -254,12 +298,13 @@ quantize-in-forward. PTQ costs nothing, since there is no forward to pay for.
 benchmarks/lab/
   stage0_toolqat.py   modern-block model, SF surgery, from-scratch sweep
   smol_qat.py         SmolLM2-360M PTQ sweep and QAT continued pretraining
+  bfcl_eval.py        BFCL v3 runner and AST matcher
+  train_1b.py         Llama-3.2-1B from-scratch QAT (in flight; no archive yet)
 benchmarks/results/
   stage0.jsonl        14 runs, section 3
   smol_ptq.jsonl      2 PTQ sweeps, ln and ln_all, section 1 and 2
   smol_qat.jsonl      2 continued-pretraining runs, section 4
-  bfcl.jsonl          4 benchmark arms, section 6
-benchmarks/lab/bfcl_eval.py   BFCL v3 runner and AST matcher
+  bfcl.jsonl          16 arms: 4 Qwen2.5-1.5B (section 6) + 12 Qwen3 (section 6b)
 ```
 
 ```bash
@@ -269,5 +314,5 @@ python stage0_toolqat.py --size 25m --bits 8 --mode ln --seed 0
 python smol_qat.py --prepare 250000000
 python smol_qat.py --ptq --mode ln_all
 python smol_qat.py --bits 6 --mode ln_all --tokens 60000000
-python bfcl_eval.py --bits 8 --mode ln_all --categories simple,multiple,irrelevance
+python bfcl_eval.py --model Qwen/Qwen3-1.7B --bits 8 --mode ln_all
 ```
