@@ -1,0 +1,21 @@
+{
+  "model": "val_ppl = A * tokens_seen ** b",
+  "loss": "val_loss = log(val_ppl)",
+  "A": 5284.266592914544,
+  "b": -0.2587962720947114,
+  "fit_on": "last 100 evals of combined metrics.jsonl",
+  "fit_tokens": [
+    880705536.0,
+    1204060160.0
+  ],
+  "in_sample_rms_ppl": 0.05046219564286313,
+  "now_tokens": 1204060160,
+  "now_step": 23134,
+  "end_tokens": 60000000000,
+  "epoch_tokens": 20000000000,
+  "tok_per_step": 32768,
+  "log_every": 50,
+  "at_1ep_20B": 11.405558547030362,
+  "at_2ep_40B": 9.532594461056025,
+  "at_3ep_60B": 8.583004814121189
+}
