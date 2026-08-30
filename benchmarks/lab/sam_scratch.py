@@ -175,7 +175,13 @@ def init_scale_for(bits):
     return max(1.0, 4.0 * step / 0.02)
 
 
-def run(bits, img_root, lbl_root, size, epochs, patience, batch, lr, seed, device):
+def result_tag(bits, fp16=False):
+    if fp16:
+        return "fp16"
+    return "fp32" if not bits else f"sf{bits}"
+
+
+def run(bits, img_root, lbl_root, size, epochs, patience, batch, lr, seed, device, fp16=False):
     rng = np.random.RandomState(seed)
     rows = index_rows(Path(img_root), Path(lbl_root))
     if len(rows) < 20:
@@ -206,6 +212,7 @@ def run(bits, img_root, lbl_root, size, epochs, patience, batch, lr, seed, devic
         clamp_all(model)
         print(f"SF{bits} quantized {nq} layers vmax={sf_params(bits)[1]:.6f}", flush=True)
     model = model.to(device)
+    use_amp = fp16 and device.type == "cuda"
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     best, stale, t0 = -1.0, 0, time.time()
     hist = []
@@ -215,7 +222,12 @@ def run(bits, img_root, lbl_root, size, epochs, patience, batch, lr, seed, devic
         for x, y in tr_ld:
             x, y = x.to(device), y.to(device)
             opt.zero_grad(set_to_none=True)
-            loss = dice_bce(model(x), y)
+            if use_amp:
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    logit = model(x)
+                loss = dice_bce(logit.float(), y)
+            else:
+                loss = dice_bce(model(x), y)
             loss.backward()
             opt.step()
             if bits:
@@ -232,15 +244,22 @@ def run(bits, img_root, lbl_root, size, epochs, patience, batch, lr, seed, devic
             if stale >= patience:
                 print(f"early stop at epoch {ep}", flush=True)
                 break
-    tag = "fp32" if not bits else f"sf{bits}"
-    rec = dict(exp="sam_scratch", model="TinyBoxSeg", bits=bits, quantized=nq,
+        # checkpoint every epoch so a jetsam still leaves a number
+        _dump(bits, nq, device, tr, va, size, hist, best, t0, scale, fp16, complete=False)
+    rec = _dump(bits, nq, device, tr, va, size, hist, best, t0, scale, fp16, complete=True)
+    print(json.dumps({k: rec[k] for k in rec if k != "history"}), flush=True)
+    return rec
+
+
+def _dump(bits, nq, device, tr, va, size, hist, best, t0, scale, fp16, complete):
+    tag = result_tag(bits, fp16)
+    rec = dict(exp="sam_scratch", model="TinyBoxSeg", bits=bits, fp16=fp16, quantized=nq,
                device=str(device), n_train=len(tr), n_val=len(va),
                size=size, epochs_ran=len(hist), best_val_iou=best,
-               seconds=time.time() - t0, init_scale=scale, history=hist[-8:])
+               seconds=time.time() - t0, init_scale=scale, history=hist[-8:],
+               complete=complete)
     OUT.mkdir(parents=True, exist_ok=True)
-    path = OUT / f"sam_scratch_{tag}.json"
-    json.dump(rec, open(path, "w"), indent=2)
-    print(json.dumps({k: rec[k] for k in rec if k != "history"}), flush=True)
+    json.dump(rec, open(OUT / f"sam_scratch_{tag}.json", "w"), indent=2)
     return rec
 
 
@@ -256,11 +275,15 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="", help="cuda | mps | cpu (default: auto)")
+    ap.add_argument("--fp16", action="store_true", help="IEEE fp16 autocast (bits must be 0)")
     a = ap.parse_args()
+    if a.fp16 and a.bits:
+        raise SystemExit("--fp16 requires --bits 0")
     disable_tf32()
     device = torch.device(a.device) if a.device else pick_device()
-    print(f"device={device} bits={a.bits}", flush=True)
-    run(a.bits, a.images, a.labels, a.size, a.epochs, a.patience, a.batch, a.lr, a.seed, device)
+    print(f"device={device} bits={a.bits} fp16={a.fp16}", flush=True)
+    run(a.bits, a.images, a.labels, a.size, a.epochs, a.patience, a.batch, a.lr, a.seed,
+        device, fp16=a.fp16)
 
 
 if __name__ == "__main__":

@@ -61,6 +61,10 @@ python exp5_alloc.py --bits 4
 python exp6_lr.py   --bits 8 --lr 4e-3
 python exp8_tierd_seeds.py --prepare       # same corpus as exp3
 python exp8_tierd_seeds.py --size 11m --tpp 10 --bits 2 --seed 1
+python exp3_11m.py --prepare               # 11M D/N under absorption (open 4.1)
+python exp3_11m.py --queue                 # 4GB-safe: micro 1, accum 16, ckpt
+python exp_ptq_absorb.py --prepare
+python exp_ptq_absorb.py --queue           # Pythia PTQ ± absorption, 4GB ok
 python bfcl_eval.py --model Qwen/Qwen3-1.7B --bits 8 --mode ln_all
 python vision_ptq.py --task both --bits 8
 python psd.py --ptq

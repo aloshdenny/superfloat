@@ -1,0 +1,4 @@
+{"absorb": false, "bits": 4, "complete": true, "dead_frac": 0.981775078508589, "exp": "ptq_absorb", "minutes": 0.3437630573908488, "size": "410m", "step": 143000, "tokens": 299892736000, "val_loss": 12.791566155797286, "wrapped": 0}
+{"absorb": false, "bits": 8, "complete": true, "dead_frac": 0.14332663350635105, "exp": "ptq_absorb", "minutes": 0.11442667245864868, "size": "410m", "step": 143000, "tokens": 299892736000, "val_loss": 3.342568464416394, "wrapped": 0}
+{"absorb": true, "bits": 6, "complete": true, "dead_frac": 0.0, "exp": "ptq_absorb", "minutes": 0.1190763235092163, "size": "410m", "step": 143000, "tokens": 299892736000, "val_loss": 3.811030926464273, "wrapped": 96}
+{"absorb": true, "bits": 8, "complete": true, "dead_frac": 0.0, "exp": "ptq_absorb", "minutes": 0.12024641036987305, "size": "410m", "step": 143000, "tokens": 299892736000, "val_loss": 3.002740007510288, "wrapped": 96}
