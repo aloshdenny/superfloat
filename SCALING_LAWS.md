@@ -210,6 +210,10 @@ five evaluations within a run). So SF5 is free at 85m and costs 0.344 nats at
 We have no mechanism for it. It is reported because it replicates, not because
 it is understood.
 
+The same `history` traces show SF16 also does not *progress* faster than SF8.
+Early loss slope and matched-token ppl sit on top of each other across the
+ladder; the comparison is in [Appendix A](#appendix-a-sf16-does-not-train-faster-than-sf8).
+
 ### 3.2 PTQ needs two more bits than QAT
 
 Penalty vs FP16 across the Pythia ladder, all at 300B tokens:
@@ -736,6 +740,10 @@ as a property of the format.
   configuration that survives 12 epochs at 6e-2 could still fail over 60. The
   claim is that no precision-dependent stability boundary exists in this
   window, not that any of these learning rates is a good idea.
+- **No mid-run precision switch was trained.** Appendix A compares parallel
+  SF16 and SF8 runs from the same init, not a single run that changes bits
+  partway. The slope result says there is no faster SF16 curve to harvest
+  before switching; it does not measure the transient at the switch itself.
 - **Half-Chinchilla token budget** (10 tokens/param). Relative degradation at
   matched (N, D) is unaffected, but absolute losses are not compute-optimal.
 - **Embedding init** uses PyTorch's default N(0,1) rather than GPT-2's
@@ -805,3 +813,50 @@ cd benchmarks
 python make_scaling_figures.py --results-dir results --out figures/
 python make_lab_figures.py     --results-dir results --out figures/
 ```
+
+---
+
+## Appendix A. SF16 does not train faster than SF8
+
+Section 3.1 reports that SF8 and SF16 *final* losses are noise-apart. A
+natural hope for a staged recipe -- train SF16 for a while, then switch to
+SF8 -- is that the extra eight significand bits buy a steeper early slope,
+so the switch can harvest SF16 progress and then run cheap. The Tier A
+histories already falsify that. No new GPU time; this is a re-read of
+`scaling_a.jsonl`.
+
+Early val-loss slope over the first ~25% of each run (skipping the step-0
+transient), nats per million tokens:
+
+| size | SF16 | SF8 | SF16 / SF8 |
+| --- | ---: | ---: | ---: |
+| 5m | 0.257 | 0.263 | 0.98 |
+| 11m | 0.043 | 0.041 | 1.05 |
+| 25m | 0.019 | 0.020 | 0.95 |
+| 85m | 0.010 | 0.010 | 1.03 |
+
+The ratio is noise around 1. Final val loss (and ppl) likewise:
+
+| size | SF16 | SF8 | SF8 − SF16 |
+| --- | ---: | ---: | ---: |
+| 5m | 6.961 (1055) | 6.963 (1056) | +0.001 |
+| 11m | 6.319 (555) | 6.337 (565) | +0.018 |
+| 25m | 5.151 (173) | **5.091 (163)** | −0.060 |
+| 85m | 3.834 (46.3) | 3.856 (47.3) | +0.022 |
+
+SF8 is not a slower climb that later catches up. At 25m it finishes *ahead*.
+The only SF16 edge is the first eval, and it is gone by the second. On the
+85m run:
+
+| tokens | SF16 | SF8 | Δ |
+| --- | ---: | ---: | ---: |
+| 42.5M | 6.582 | 6.730 | +0.149 |
+| 85.0M | 5.833 | 5.836 | +0.004 |
+| 850.5M (end) | 3.834 | 3.856 | +0.022 |
+
+So a short SF16 pad, if used at all, is "until the first chaotic eval is
+over" -- a few thousand steps, on the order of the first 0.05–0.1 of the
+token budget -- not 1–2 epochs. Waiting longer does not bank a steeper
+curve, because there is not one. This is the same conclusion the vision
+benchmarks reached from final accuracy: SF8 is indistinguishable from SF16,
+and the extra bits do not buy a faster path to that tie.

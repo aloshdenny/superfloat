@@ -243,6 +243,11 @@ reached here without a ternary-specific training recipe.
 - **Precision and learning rate are independent knobs** — no divergence in
   60 cells across a 640x range of step size, retiring a claim this README
   previously made (see [failure modes](#failure-modes-and-which-ones-survived-scrutiny)).
+- **SF16 does not train faster than SF8.** Re-reading the Tier A LM histories,
+  early val-loss slope is noise around 1× (0.95–1.05) across 5M–85M, and the
+  only SF16 lead (first eval, +0.15 nats at 85M) is gone by the second. A
+  staged SF16→SF8 recipe does not harvest a steeper curve; see
+  [SCALING_LAWS.md Appendix A](SCALING_LAWS.md#appendix-a-sf16-does-not-train-faster-than-sf8).
 
 ![Width law](benchmarks/figures/scaling_c_width.png)
 
@@ -435,6 +440,12 @@ reproduce: both figure scripts read `benchmarks/results/`.
 | `scaling_critical_precision.png` | logistic p0 fit, width law vs Kaiming | `analyze_scaling.py` |
 | `scaling_qat_vs_ptq.png` | QAT and PTQ thresholds side by side | `analyze_scaling.py` |
 
+**Appendix** — re-analysis of an existing result file, no new GPU run.
+
+| # | question | source | § |
+| --- | --- | --- | --- |
+| A | does SF16 drop loss faster than SF8? | `scaling_a.jsonl` histories | App. A |
+
 **Evaluation figures** for the benchmark tables live in the same directory and
 are produced by `make_figures.py`: `format_overlay.png`,
 `accuracy_vs_storage.png`, `failure_modes.png`, and the `convergence_*.png`
@@ -464,6 +475,7 @@ python analyze_scaling.py      --results-dir results --out figures/
 | Cost of over-training a 160M model to 300B tokens | **2.5 bits** | 3.3 |
 | Reported SF16 @ ResNet-56 seed spread | **12.0 → 0.94** points | 5.6 |
 | Tier D inversion, re-run | every cell within **0.016** nats | 4.1 |
+| SF16 vs SF8 early loss slope | **0.95–1.05×**, first-eval gap gone by eval 2 | App. A |
 
 ---
 
