@@ -1,0 +1,3 @@
+{"exp": "code_xlat", "model": "Qwen/Qwen3-0.6B", "bits": 0, "mode": "-", "quantized": 0, "n": 30, "pass_rate": 0.8666666666666667, "hits": 26, "minutes": 0.47447830041249595}
+{"exp": "code_xlat", "model": "Qwen/Qwen3-0.6B", "bits": 6, "mode": "ln_all", "quantized": 196, "n": 30, "pass_rate": 0.26666666666666666, "hits": 8, "minutes": 26.466819500923158}
+{"exp": "code_xlat", "model": "Qwen/Qwen3-0.6B", "bits": 8, "mode": "ln_all", "quantized": 196, "n": 30, "pass_rate": 0.8333333333333334, "hits": 25, "minutes": 3.0640892505645754}

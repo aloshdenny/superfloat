@@ -206,8 +206,34 @@ def run_one(a):
         y = np.stack([data[i + 1:i + 1 + SEQLEN] for i in ix]).astype(np.int64)
         return torch.from_numpy(x).cuda(), torch.from_numpy(y).cuda()
 
+    # ---- resume support -------------------------------------------------
+    # These cells run 13k-26k steps (hours). The host they run on restarts, and
+    # a result JSON is only written at the very end, so an interruption used to
+    # discard the whole cell. Checkpoint periodically and resume from it.
+    ckpt_path = f"{OUT}/{tag}.ckpt"
     hist, t0 = [], time.time()
-    for step in range(steps):
+    start_step = 0
+    if os.path.exists(ckpt_path):
+        try:
+            ck = torch.load(ckpt_path, map_location="cuda", weights_only=False)
+            model.load_state_dict(ck["model"])
+            opt.load_state_dict(ck["opt"])
+            sched.load_state_dict(ck["sched"])
+            start_step = ck["step"] + 1
+            hist = ck.get("hist", [])
+            rng = np.random.default_rng(a.seed + start_step)   # avoid replaying data
+            print(f"[{tag}] resumed from step {start_step}/{steps}", flush=True)
+        except Exception as e:
+            print(f"[{tag}] checkpoint unreadable ({e}), starting fresh", flush=True)
+            start_step = 0
+
+    def save_ckpt(step):
+        tmp = ckpt_path + ".tmp"
+        torch.save({"step": step, "model": model.state_dict(), "opt": opt.state_dict(),
+                    "sched": sched.state_dict(), "hist": hist}, tmp)
+        os.replace(tmp, ckpt_path)          # atomic: never leave a torn checkpoint
+
+    for step in range(start_step, steps):
         opt.zero_grad(set_to_none=True)
         for _ in range(a.accum):
             x, y = get(0, train_end, a.micro)
@@ -230,6 +256,9 @@ def run_one(a):
             hist.append(rec_h)
             print(f"[{tag}] {step}/{steps} val={rec_h['val_loss']:.4f} "
                   f"mem={rec_h['mem_mb']:.0f}MiB", flush=True)
+            save_ckpt(step)
+        elif step % 500 == 0:
+            save_ckpt(step)          # bound worst-case loss to ~500 steps
     rec = {"exp": "exp3_11m", "size": a.size, "bits": a.bits, "tpp": a.tpp,
            "seed": a.seed, "n_nonembed": n_ne, "tokens": total, "steps": steps,
            "micro": a.micro, "accum": a.accum, "checkpoint": a.checkpoint,
@@ -237,6 +266,8 @@ def run_one(a):
            "minutes": (time.time() - t0) / 60, "history": hist, "complete": True}
     os.makedirs(OUT, exist_ok=True)
     json.dump(rec, open(path, "w"))
+    if os.path.exists(ckpt_path):
+        os.remove(ckpt_path)         # cell is done; free the checkpoint
     print(f"[{tag}] DONE val={hist[-1]['val_loss']:.4f} ({rec['minutes']:.0f}m)", flush=True)
 
 

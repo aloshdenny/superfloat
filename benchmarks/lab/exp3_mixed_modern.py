@@ -1,18 +1,26 @@
-"""11M D/N sweep under scale absorption (the open 4.1 follow-up).
+"""Mixed-precision layer-group allocation, stage 2: modern block shape.
 
-exp3 ran this grid at 5M, where the inversion does not exist. This is the same
-recipe at 11M: tpp 5/10/20/40, bits 0/2/3/4/6, one seed. 4GB-safe defaults
-(microbatch 1, accum 16, checkpoint, chunked CE) keep the effective batch at
-the archived 16 x 1024.
+Stage 1 (exp3_mixed.py) ran this on a GPT-2-style block (LayerNorm/GELU/MHA)
+and found protect-C beats uniform by ~37x at a matched 4-bit average, both
+seeds. That result could be an artifact of the GPT-2 block specifically --
+this repeats the same group allocation (A: q/k/v, B: mlp-in, C: o + mlp-out)
+on the RMSNorm/SwiGLU/GQA block used everywhere else in this study (stage0,
+puresf_llm), weights-only, no activation quantization, to check the win
+survives a block shape where GQA gives k/v far fewer params than q and SwiGLU
+splits "mlp-in" into two parallel projections (gate, up) instead of one.
+
+The per-group bit assignments (uniform6 6/6/6, protect-C 5/5/8, ...) are
+carried over unchanged from stage 1's 33/33/33-derived arms; GQA/SwiGLU shift
+each group's real parameter share, so the achieved average bit width is not
+exactly the nominal target -- it is computed from real numel counts and
+printed per cell (avg_bits), same discipline exp3_mixed.py already uses.
 
     EXP3_OUT=./results EXP3_TOKENS=./fineweb_edu_tokens.bin \\
-      python exp3_11m.py --prepare
-    python exp3_11m.py --tpp 20 --bits 2 --seed 0
-    python exp3_11m.py --queue            # remaining cells, skip-if-done
+      python exp3_mixed_modern.py --queue
 """
 from __future__ import annotations
 
-import argparse, json, os, sys, time
+import argparse, json, math, os, sys, time
 import numpy as np, torch, torch.nn as nn, torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
@@ -23,9 +31,18 @@ VOCAB, SEQLEN = 50304, 1024
 OUT = os.environ.get("EXP3_OUT", "/workspace/results")
 TOKENS = os.environ.get("EXP3_TOKENS", "/workspace/fineweb_edu_tokens.bin")
 TARGET_TOKENS = 500_000_000
-CONFIGS = {"5m": (256, 6, 4), "11m": (384, 6, 6), "25m": (512, 8, 8)}
-QUEUE_TPP = (5, 10, 20, 40)
-QUEUE_BITS = (0, 2, 3, 4, 6)
+CONFIGS = {"11m": dict(d=384, n_layer=6, nh=6, nkv=2, hidden=1024)}
+
+# arm -> (bits_a, bits_b, bits_c), carried over from stage 1 (EXPERIMENT_PLAN_mixed.md)
+ARMS = {
+    "uniform6":  (6, 6, 6),
+    "protect-C6": (5, 5, 8),
+    "starve-C6": (7, 7, 4),
+    "protect-A6": (8, 5, 5),
+    "uniform4":  (4, 4, 4),
+    "protect-C4": (3, 3, 6),
+    "starve-C4": (5, 5, 2),
+}
 
 
 def prepare_tokens():
@@ -70,83 +87,105 @@ def prepare_tokens():
     print(f"corpus written: {i/1e6:.0f}M", flush=True)
 
 
-def build(d_model, n_layer, n_head, use_ckpt):
-    class Attn(nn.Module):
-        def __init__(s):
-            super().__init__()
-            s.q = nn.Linear(d_model, d_model)
-            s.k = nn.Linear(d_model, d_model)
-            s.v = nn.Linear(d_model, d_model)
-            s.proj = nn.Linear(d_model, d_model)
-            s.n_head = n_head
+# --------------------------------------------------------------- model -----
+def rope(q, k, cos, sin):
+    def rot(t):
+        a, b = t.chunk(2, dim=-1); return torch.cat((-b, a), dim=-1)
+    return q * cos + rot(q) * sin, k * cos + rot(k) * sin
 
-        def forward(s, x):
-            B, T, C = x.shape
-            hd = C // s.n_head
-            q = s.q(x).view(B, T, s.n_head, hd).transpose(1, 2)
-            k = s.k(x).view(B, T, s.n_head, hd).transpose(1, 2)
-            v = s.v(x).view(B, T, s.n_head, hd).transpose(1, 2)
-            o = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-            return s.proj(o.transpose(1, 2).reshape(B, T, C))
 
+class RMSNorm(nn.Module):
+    def __init__(self, d, eps=1e-6):
+        super().__init__()
+        self.w = nn.Parameter(torch.ones(d)); self.eps = eps
+
+    def forward(self, x):
+        return self.w * (x * torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + self.eps)).type_as(x)
+
+
+def build(d, n_layer, nh, nkv, hidden, seqlen, use_ckpt):
     class Block(nn.Module):
         def __init__(s):
             super().__init__()
-            s.ln1 = nn.LayerNorm(d_model)
-            s.attn = Attn()
-            s.ln2 = nn.LayerNorm(d_model)
-            s.mlp = nn.Sequential(
-                nn.Linear(d_model, 4 * d_model), nn.GELU(),
-                nn.Linear(4 * d_model, d_model))
+            s.nh, s.nkv, s.hd = nh, nkv, d // nh
+            s.n1 = RMSNorm(d)
+            s.q = nn.Linear(d, nh * s.hd, bias=False)
+            s.k = nn.Linear(d, nkv * s.hd, bias=False)
+            s.v = nn.Linear(d, nkv * s.hd, bias=False)
+            s.o = nn.Linear(nh * s.hd, d, bias=False)
+            s.n2 = RMSNorm(d)
+            s.gate = nn.Linear(d, hidden, bias=False)
+            s.up = nn.Linear(d, hidden, bias=False)
+            s.down = nn.Linear(hidden, d, bias=False)
 
-        def forward(s, x):
-            x = x + s.attn(s.ln1(x))
-            return x + s.mlp(s.ln2(x))
+        def forward(s, x, cos, sin):
+            B, T, C = x.shape
+            h = s.n1(x)
+            q = s.q(h).view(B, T, s.nh, s.hd).transpose(1, 2)
+            k = s.k(h).view(B, T, s.nkv, s.hd).transpose(1, 2)
+            v = s.v(h).view(B, T, s.nkv, s.hd).transpose(1, 2)
+            q, k = rope(q, k, cos, sin)
+            if s.nkv != s.nh:
+                r = s.nh // s.nkv
+                k = k.repeat_interleave(r, dim=1); v = v.repeat_interleave(r, dim=1)
+            a = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            a = a.transpose(1, 2).reshape(B, T, -1)
+            x = x + s.o(a)
+            h = s.n2(x)
+            m = F.silu(s.gate(h)) * s.up(h)
+            return x + s.down(m)
 
-    class GPT(nn.Module):
+    class LM(nn.Module):
         def __init__(s):
             super().__init__()
-            s.wte = nn.Embedding(VOCAB, d_model)
-            s.wpe = nn.Embedding(SEQLEN, d_model)
+            s.wte = nn.Embedding(VOCAB, d)
             s.blocks = nn.ModuleList([Block() for _ in range(n_layer)])
-            s.lnf = nn.LayerNorm(d_model)
-            s.head = nn.Linear(d_model, VOCAB, bias=False)
+            s.nf = RMSNorm(d)
+            s.head = nn.Linear(d, VOCAB, bias=False)
             s.head.weight = s.wte.weight
             s.use_ckpt = use_ckpt
+            hd = d // nh
+            inv = 1.0 / (10000 ** (torch.arange(0, hd, 2).float() / hd))
+            t = torch.arange(seqlen).float()
+            f = torch.outer(t, inv)
+            emb = torch.cat((f, f), dim=-1)
+            s.register_buffer("cos", emb.cos()[None, None], persistent=False)
+            s.register_buffer("sin", emb.sin()[None, None], persistent=False)
+            s.apply(s._init)
+            for n_, p_ in s.named_parameters():
+                if n_.endswith(("o.weight", "down.weight")):
+                    nn.init.normal_(p_, mean=0.0, std=0.02 / math.sqrt(2 * n_layer))
+
+        @staticmethod
+        def _init(m):
+            if isinstance(m, (nn.Linear, nn.Embedding)):
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
         def hidden(s, idx):
-            x = s.wte(idx) + s.wpe(torch.arange(idx.shape[1], device=idx.device))
+            x = s.wte(idx)
+            T = idx.shape[1]
+            cos, sin = s.cos[:, :, :T], s.sin[:, :, :T]
             for b in s.blocks:
                 if s.use_ckpt and s.training:
-                    x = checkpoint(b, x, use_reentrant=False)
+                    x = checkpoint(b, x, cos, sin, use_reentrant=False)
                 else:
-                    x = b(x)
-            return s.lnf(x)
+                    x = b(x, cos, sin)
+            return s.nf(x)
 
         def forward(s, idx):
             return s.head(s.hidden(idx))
 
-    return GPT()
+    return LM()
 
 
-LAYER_GROUPS = ("A", "B", "C")   # A: q/k/v   B: mlp-in   C: o + mlp-out
+LAYER_GROUPS = ("A", "B", "C")   # A: q/k/v   B: gate/up   C: o + down
 
 
 def install_mixed(model, bits_a, bits_b, bits_c):
-    """Per-group bit widths instead of one width everywhere.
-
-    Groups are chosen by whether the scale is absorbable, which is what the
-    study says should decide fragility:
-
-      A  q, k, v      absorbable into the norm feeding them (shared g)
-      B  mlp[0]       absorbable into the norm feeding it
-      C  o, mlp[2]    fed by NO norm -- scale is not absorbable, and these
-                      carry residual-scaled init (std 0.005 vs 0.02), so they
-                      are structurally the most vulnerable to a coarse grid
-
-    bits=0 for a group leaves it unquantized. Returns per-group counts and the
-    parameter-weighted average bit width, which is what arms are matched on.
-    """
+    """Same recipe as exp3_mixed.install_mixed, ported to q/k/v/o/gate/up/down
+    names. A and B keep an absorbable per-input-channel column scale (they are
+    fed by an RMSNorm whose gain can carry it); C gets none (fed by no norm,
+    residual-scaled init) -- see exp3_mixed.py for the full rationale."""
     class SFLinearCol(SFLinear):
         sf_group = None
 
@@ -160,9 +199,6 @@ def install_mixed(model, bits_a, bits_b, bits_c):
             return F.linear(x * g, wq, b)
 
     class SFLinearPlain(SFLinear):
-        """No absorbable scale: quantize the weights as they stand. A per-output
-        row scale would be recoverable after a conv via BatchNorm, but these
-        outputs go into a residual stream where nothing undoes a row scale."""
         def forward(self, x):
             wq = sf_quantize_sv(self.weight, self.sf_scale, self.sf_vmax)
             b = None if self.bias is None else sf_quantize_sv(
@@ -173,21 +209,21 @@ def install_mixed(model, bits_a, bits_b, bits_c):
     wbits = 0.0
     wtot = 0.0
     for blk in model.blocks:
-        at = blk.attn
-        grp = [at.q.weight, at.k.weight, at.v.weight]
-        for m in (at.q, at.k, at.v):
+        grp = [blk.q.weight, blk.k.weight, blk.v.weight]
+        for m in (blk.q, blk.k, blk.v):
             wtot += m.weight.numel(); wbits += m.weight.numel() * (bits_a or 32)
             if bits_a:
                 s, v = sf_params(bits_a)
                 m.__class__ = SFLinearCol; m.sf_scale, m.sf_vmax = s, v
                 m.sf_group = grp; counts["A"] += 1
-        m = blk.mlp[0]
-        wtot += m.weight.numel(); wbits += m.weight.numel() * (bits_b or 32)
-        if bits_b:
-            s, v = sf_params(bits_b)
-            m.__class__ = SFLinearCol; m.sf_scale, m.sf_vmax = s, v
-            m.sf_group = None; counts["B"] += 1
-        for m in (at.proj, blk.mlp[2]):
+        grp_b = [blk.gate.weight, blk.up.weight]
+        for m in (blk.gate, blk.up):
+            wtot += m.weight.numel(); wbits += m.weight.numel() * (bits_b or 32)
+            if bits_b:
+                s, v = sf_params(bits_b)
+                m.__class__ = SFLinearCol; m.sf_scale, m.sf_vmax = s, v
+                m.sf_group = grp_b; counts["B"] += 1
+        for m in (blk.o, blk.down):
             wtot += m.weight.numel(); wbits += m.weight.numel() * (bits_c or 32)
             if bits_c:
                 s, v = sf_params(bits_c)
@@ -208,32 +244,30 @@ def chunked_ce(model, x, y, chunk):
 
 
 def run_one(a):
-    d_model, n_layer, n_head = CONFIGS[a.size]
+    cfg = CONFIGS[a.size]
     disable_tf32()
     torch.manual_seed(a.seed)
     if a.bits_a is not None:
-        tag = f"mix_{a.size}_tpp{a.tpp}_{a.arm or 'a%sb%sc%s' % (a.bits_a, a.bits_b, a.bits_c)}_s{a.seed}"
+        tag = f"mixmod_{a.size}_tpp{a.tpp}_{a.arm or 'a%sb%sc%s' % (a.bits_a, a.bits_b, a.bits_c)}_s{a.seed}"
     else:
-        tag = f"exp3_{a.size}_tpp{a.tpp}_" + ("fp32" if a.bits == 0 else f"sf{a.bits}") + f"_s{a.seed}"
+        tag = f"mixmod_{a.size}_tpp{a.tpp}_" + ("fp32" if a.bits == 0 else f"sf{a.bits}") + f"_s{a.seed}"
     path = f"{OUT}/{tag}.json"
     if os.path.exists(path):
         print(f"[{tag}] done, skip", flush=True)
         return
-    model = build(d_model, n_layer, n_head, a.checkpoint).cuda()
-    n_ne = sum(p.numel() for p in model.parameters()) \
-           - model.wte.weight.numel() - model.wpe.weight.numel()
+    model = build(cfg["d"], cfg["n_layer"], cfg["nh"], cfg["nkv"], cfg["hidden"],
+                  SEQLEN, a.checkpoint).cuda()
+    n_ne = sum(p.numel() for p in model.parameters()) - model.wte.weight.numel()
     ncol = 0
     if a.bits:
-        nconv = apply_superfloat(model, bits=a.bits, head_names=("head", "wte", "wpe"),
+        nconv = apply_superfloat(model, bits=a.bits, head_names=("head", "wte"),
                                  quantize_activations=False)
-        assert nconv == 6 * n_layer, f"quantized {nconv}, expected {6 * n_layer}"
+        assert nconv == 7 * cfg["n_layer"], f"quantized {nconv}, expected {7 * cfg['n_layer']}"
         if a.bits_a is not None:
             counts, avgbits = install_mixed(model, a.bits_a, a.bits_b, a.bits_c)
             ncol = counts["A"] + counts["B"]
             print(f"[{tag}] alloc A={a.bits_a} B={a.bits_b} C={a.bits_c} "
                   f"counts={counts} avg_bits={avgbits:.2f}", flush=True)
-        else:
-            ncol = install_col_norm(model)
     eff_batch = a.micro * a.accum
     total = int(n_ne * a.tpp)
     steps = total // (eff_batch * SEQLEN)
@@ -255,10 +289,6 @@ def run_one(a):
         y = np.stack([data[i + 1:i + 1 + SEQLEN] for i in ix]).astype(np.int64)
         return torch.from_numpy(x).cuda(), torch.from_numpy(y).cuda()
 
-    # ---- resume support -------------------------------------------------
-    # These cells run 13k-26k steps (hours). The host they run on restarts, and
-    # a result JSON is only written at the very end, so an interruption used to
-    # discard the whole cell. Checkpoint periodically and resume from it.
     ckpt_path = f"{OUT}/{tag}.ckpt"
     hist, t0 = [], time.time()
     start_step = 0
@@ -270,7 +300,7 @@ def run_one(a):
             sched.load_state_dict(ck["sched"])
             start_step = ck["step"] + 1
             hist = ck.get("hist", [])
-            rng = np.random.default_rng(a.seed + start_step)   # avoid replaying data
+            rng = np.random.default_rng(a.seed + start_step)
             print(f"[{tag}] resumed from step {start_step}/{steps}", flush=True)
         except Exception as e:
             print(f"[{tag}] checkpoint unreadable ({e}), starting fresh", flush=True)
@@ -280,7 +310,7 @@ def run_one(a):
         tmp = ckpt_path + ".tmp"
         torch.save({"step": step, "model": model.state_dict(), "opt": opt.state_dict(),
                     "sched": sched.state_dict(), "hist": hist}, tmp)
-        os.replace(tmp, ckpt_path)          # atomic: never leave a torn checkpoint
+        os.replace(tmp, ckpt_path)
 
     for step in range(start_step, steps):
         opt.zero_grad(set_to_none=True)
@@ -307,8 +337,8 @@ def run_one(a):
                   f"mem={rec_h['mem_mb']:.0f}MiB", flush=True)
             save_ckpt(step)
         elif step % 500 == 0:
-            save_ckpt(step)          # bound worst-case loss to ~500 steps
-    rec = {"exp": "exp3_11m" if a.bits_a is None else "mixed_alloc",
+            save_ckpt(step)
+    rec = {"exp": "exp3_11m" if a.bits_a is None else "mixed_alloc_modern",
            "size": a.size, "bits": a.bits, "tpp": a.tpp,
            "arm": a.arm or None, "bits_a": a.bits_a, "bits_b": a.bits_b, "bits_c": a.bits_c,
            "seed": a.seed, "n_nonembed": n_ne, "tokens": total, "steps": steps,
@@ -318,17 +348,17 @@ def run_one(a):
     os.makedirs(OUT, exist_ok=True)
     json.dump(rec, open(path, "w"))
     if os.path.exists(ckpt_path):
-        os.remove(ckpt_path)         # cell is done; free the checkpoint
+        os.remove(ckpt_path)
     print(f"[{tag}] DONE val={hist[-1]['val_loss']:.4f} ({rec['minutes']:.0f}m)", flush=True)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bits", type=int, default=3)
-    ap.add_argument("--bits-a", type=int, default=None, help="q/k/v width")
-    ap.add_argument("--bits-b", type=int, default=None, help="mlp-in width")
-    ap.add_argument("--bits-c", type=int, default=None, help="o + mlp-out width")
-    ap.add_argument("--arm", default="", help="label for the allocation")
+    ap.add_argument("--bits-a", type=int, default=None)
+    ap.add_argument("--bits-b", type=int, default=None)
+    ap.add_argument("--bits-c", type=int, default=None)
+    ap.add_argument("--arm", default="")
     ap.add_argument("--tpp", type=int, default=10)
     ap.add_argument("--size", default="11m", choices=sorted(CONFIGS))
     ap.add_argument("--seed", type=int, default=0)
@@ -346,9 +376,13 @@ def main():
         prepare_tokens()
         return
     if a.queue:
-        for tpp in QUEUE_TPP:
-            for bits in QUEUE_BITS:
-                a.tpp, a.bits = tpp, bits
+        # fp32 control + 7 arms, two seeds, matching stage 1's cell count
+        for seed in (0, 1):
+            a.seed = seed
+            a.bits, a.bits_a, a.bits_b, a.bits_c, a.arm = 0, None, None, None, ""
+            run_one(a)
+            for arm, (ba, bb, bc) in ARMS.items():
+                a.bits, a.bits_a, a.bits_b, a.bits_c, a.arm = 6, ba, bb, bc, arm
                 run_one(a)
         return
     run_one(a)
