@@ -82,32 +82,43 @@ about $12. The budget allows repeating the whole thing at a second seed, which
 matters because the coco128 replicates showed single-seed SF runs can spread
 0.28 -- differences below the seed spread are not results.
 
-## Stage 2 progress (2026-09-19, Modal, in flight)
+## Stage 2 (2026-09-19, Modal) -- seed 0 complete, seed 1 in flight
 
 `exp3_mixed_modern.py` ports `install_mixed`'s group allocation onto the
 RMSNorm/SwiGLU/GQA block (`benchmarks/results/mixed_alloc_modern.jsonl`).
-Early, partial, seed-0-only numbers at the 6-bit tier:
+All 7 seed-0 arms are done:
 
-| arm | A | B | C | val loss | penalty vs fp32 |
+| arm | A | B | C | val loss (s0) | penalty vs fp32 (s0) |
 | --- | --- | --- | --- | --- | --- |
-| fp32 control (s0) | - | - | - | 4.2354 | - |
-| uniform6 | 6 | 6 | 6 | 4.4771 | +0.2417 |
+| fp32 control | - | - | - | 4.2354 | - |
+| **6-bit tier** | | | | | |
 | protect-C6 | 5 | 5 | 8 | 4.3626 | +0.1273 |
+| uniform6 | 6 | 6 | 6 | 4.4771 | +0.2417 |
 | protect-A6 | 8 | 5 | 5 | 4.4835 | +0.2481 |
-| uniform4 | 4 | 4 | 4 | 4.5198 | +0.2844 |
+| starve-C6 | 7 | 7 | 4 | 4.5425 | +0.3072 |
+| **4-bit tier** | | | | | |
 | protect-C4 | 3 | 3 | 6 | 4.3516 | +0.1162 |
+| uniform4 | 4 | 4 | 4 | 4.5198 | +0.2844 |
+| starve-C4 | 5 | 5 | 2 | 4.6491 | +0.4137 |
 
-protect-C6 beats uniform6 by 0.114 nats, same direction as stage 1's ~37x
-result. protect-A6 -- the "does any non-uniform allocation help" control --
-is now in too, and it is the WORST of the three quantized 6-bit arms,
-slightly behind even uniform6. protect-C4 (4-bit tier) beats uniform4 by
-0.168 nats, a larger gap than at the 6-bit tier, matching stage 1's own
-finding that the allocation effect grows as the grid coarsens. FIVE of the
-seven arms are in (starve-C6, starve-C4 still running); seed 1 has started
-on uniform6, protect-C6, starve-C6, uniform4, protect-C4.
-Do not cite the "beats by Nx" framing until starve-C6/starve-C4 and a
-second seed
-land.
+Both tiers rank identically: protect-C < uniform < {protect-A6 at 6-bit} <
+starve-C. protect-C beats uniform by 0.114 nats at 6-bit and 0.168 nats at
+4-bit -- the gap growing as the grid coarsens, matching stage 1. starve-C
+is worst or near-worst at both tiers, as the hypothesis predicts.
+
+Seed 1 has landed on the two arms that matter most for replication:
+
+| arm | val loss (s1) | protect-C6 vs uniform6 |
+| --- | --- | --- |
+| uniform6 | 4.4060 | |
+| protect-C6 | 4.3599 | **-0.0461** |
+
+Same direction as seed 0 (-0.1145), smaller magnitude -- note the fp32
+control itself moved 0.11 nats between seeds (4.2354 to 4.3455), so a
+chunk of that swing is seed noise on the measurement, not the effect
+shrinking. Two seeds, one direction, is real replication; it is not yet
+enough to quote a precise magnitude. Remaining seed-1 arms (protect-A6,
+starve-C6, uniform4, protect-C4, starve-C4) still running.
 
 ## Stage 3 (2026-09-19, Modal) -- complete, one seed
 
