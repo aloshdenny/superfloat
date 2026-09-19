@@ -81,3 +81,21 @@ parallelise well (the job is launch-bound at ~3% FLOP utilisation). Roughly:
 about $12. The budget allows repeating the whole thing at a second seed, which
 matters because the coco128 replicates showed single-seed SF runs can spread
 0.28 -- differences below the seed spread are not results.
+
+## Stage 2 progress (2026-09-19, Modal, in flight)
+
+`exp3_mixed_modern.py` ports `install_mixed`'s group allocation onto the
+RMSNorm/SwiGLU/GQA block (`benchmarks/results/mixed_alloc_modern.jsonl`).
+Early, partial, seed-0-only numbers at the 6-bit tier:
+
+| arm | A | B | C | val loss | penalty vs fp32 |
+| --- | --- | --- | --- | --- | --- |
+| fp32 control (s0) | - | - | - | 4.2354 | - |
+| uniform6 | 6 | 6 | 6 | 4.4771 | +0.2417 |
+| protect-C6 | 5 | 5 | 8 | 4.3626 | +0.1273 |
+
+protect-C6 beats uniform6 by 0.114 nats, same direction as stage 1's ~37x
+result -- but this is ONE seed and TWO of the seven planned arms (starve-C6,
+protect-A6, and the 4-bit tier are still running). Not yet a result, just a
+consistent early signal. Do not cite the "beats by Nx" framing until
+starve-C6 and a second seed land.
