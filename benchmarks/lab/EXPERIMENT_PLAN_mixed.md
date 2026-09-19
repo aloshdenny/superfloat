@@ -106,19 +106,24 @@ starve-C. protect-C beats uniform by 0.114 nats at 6-bit and 0.168 nats at
 4-bit -- the gap growing as the grid coarsens, matching stage 1. starve-C
 is worst or near-worst at both tiers, as the hypothesis predicts.
 
-Seed 1 has landed on the two arms that matter most for replication:
+The full 6-bit tier is now replicated at seed 1, and the ranking is
+identical to seed 0:
 
-| arm | val loss (s1) | protect-C6 vs uniform6 |
+| arm | val loss (s0) | val loss (s1) |
 | --- | --- | --- |
-| uniform6 | 4.4060 | |
-| protect-C6 | 4.3599 | **-0.0461** |
+| protect-C6 | 4.3626 | 4.3599 |
+| uniform6 | 4.4771 | 4.4060 |
+| protect-A6 | 4.4835 | 4.5855 |
+| starve-C6 | 4.5425 | 4.6496 |
 
-Same direction as seed 0 (-0.1145), smaller magnitude -- note the fp32
-control itself moved 0.11 nats between seeds (4.2354 to 4.3455), so a
-chunk of that swing is seed noise on the measurement, not the effect
-shrinking. Two seeds, one direction, is real replication; it is not yet
-enough to quote a precise magnitude. Remaining seed-1 arms (protect-A6,
-starve-C6, uniform4, protect-C4, starve-C4) still running.
+`protect-C6 < uniform6 < protect-A6 < starve-C6` holds at both seeds. The
+protect-C6-vs-uniform6 gap is -0.1145 at seed 0 and -0.0461 at seed 1 --
+same direction, different magnitude; the fp32 control itself moved 0.11
+nats between seeds (4.2354 to 4.3455), so some of that swing is measurement
+noise rather than the effect shrinking. Two-seed rank replication across
+all four 6-bit arms is a real result; the exact magnitude is not yet
+pinned down. 4-bit tier seed 1 (uniform4, protect-C4, starve-C4) is at
+~85-90% and still running.
 
 ## Stage 3 (2026-09-19, Modal) -- complete, one seed
 
