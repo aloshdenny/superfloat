@@ -93,9 +93,33 @@ Early, partial, seed-0-only numbers at the 6-bit tier:
 | fp32 control (s0) | - | - | - | 4.2354 | - |
 | uniform6 | 6 | 6 | 6 | 4.4771 | +0.2417 |
 | protect-C6 | 5 | 5 | 8 | 4.3626 | +0.1273 |
+| protect-A6 | 8 | 5 | 5 | 4.4835 | +0.2481 |
 
 protect-C6 beats uniform6 by 0.114 nats, same direction as stage 1's ~37x
-result -- but this is ONE seed and TWO of the seven planned arms (starve-C6,
-protect-A6, and the 4-bit tier are still running). Not yet a result, just a
-consistent early signal. Do not cite the "beats by Nx" framing until
-starve-C6 and a second seed land.
+result. protect-A6 -- the "does any non-uniform allocation help" control --
+is now in too, and it is the WORST of the three quantized arms, slightly
+behind even uniform6. That is the sharper claim stage 1's design was built
+to isolate: it is not non-uniformity that helps, it is specifically
+protecting C. Still ONE seed and THREE of the seven planned arms
+(starve-C6 running now; the 4-bit tier and a second seed have not started).
+Do not cite the "beats by Nx" framing until starve-C6 and a second seed
+land.
+
+## Stage 3 progress (2026-09-19, Modal, in flight)
+
+25M GPT-2-style, 4-bit tier only (`benchmarks/results/mixed_alloc_stage3.jsonl`),
+one seed so far:
+
+| arm | A | B | C | val loss | vs fp32 |
+| --- | --- | --- | --- | --- | --- |
+| fp32 control | - | - | - | 5.2788 | - |
+| protect-C4 | 3 | 3 | 6 | 5.0711 | **-0.2077** |
+| starve-C4 | 5 | 5 | 2 | 5.6533 | +0.3745 |
+
+starve-C4 is worse than the control, as expected. protect-C4 is not just
+better than uniform4 (not yet run at this size) -- it is better than the
+fp32 control itself. One seed, so this could be noise or a genuinely lucky
+draw rather than SF4 regularising away real overfitting; it should not be
+read as "SF4 beats fp32" until uniform4 and a second seed land and the gap
+survives. Flagged here rather than smoothed over because it is the kind of
+number that is easy to misquote out of context.
