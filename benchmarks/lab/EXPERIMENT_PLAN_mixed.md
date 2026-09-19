@@ -82,48 +82,37 @@ about $12. The budget allows repeating the whole thing at a second seed, which
 matters because the coco128 replicates showed single-seed SF runs can spread
 0.28 -- differences below the seed spread are not results.
 
-## Stage 2 (2026-09-19, Modal) -- seed 0 complete, seed 1 in flight
+## Stage 2 (2026-09-19, Modal) -- complete, 2 seeds
 
 `exp3_mixed_modern.py` ports `install_mixed`'s group allocation onto the
-RMSNorm/SwiGLU/GQA block (`benchmarks/results/mixed_alloc_modern.jsonl`).
-All 7 seed-0 arms are done:
+RMSNorm/SwiGLU/GQA block. All 16 cells done (fp32 control + 7 arms, 2
+seeds each; `benchmarks/results/mixed_alloc_modern.jsonl`). Penalty is
+against that seed's OWN fp32 control (4.2354 at s0, 4.3455 at s1 -- the
+controls themselves differ by 0.11 nats, which is the scale of seed noise
+in this setup):
 
-| arm | A | B | C | val loss (s0) | penalty vs fp32 (s0) |
+| arm | A | B | C | penalty (s0) | penalty (s1) |
 | --- | --- | --- | --- | --- | --- |
-| fp32 control | - | - | - | 4.2354 | - |
 | **6-bit tier** | | | | | |
-| protect-C6 | 5 | 5 | 8 | 4.3626 | +0.1273 |
-| uniform6 | 6 | 6 | 6 | 4.4771 | +0.2417 |
-| protect-A6 | 8 | 5 | 5 | 4.4835 | +0.2481 |
-| starve-C6 | 7 | 7 | 4 | 4.5425 | +0.3072 |
+| protect-C6 | 5 | 5 | 8 | +0.1272 | +0.0144 |
+| uniform6 | 6 | 6 | 6 | +0.2417 | +0.0604 |
+| protect-A6 | 8 | 5 | 5 | +0.2482 | +0.2400 |
+| starve-C6 | 7 | 7 | 4 | +0.3071 | +0.3041 |
 | **4-bit tier** | | | | | |
-| protect-C4 | 3 | 3 | 6 | 4.3516 | +0.1162 |
-| uniform4 | 4 | 4 | 4 | 4.5198 | +0.2844 |
-| starve-C4 | 5 | 5 | 2 | 4.6491 | +0.4137 |
+| protect-C4 | 3 | 3 | 6 | +0.1162 | +0.0919 |
+| uniform4 | 4 | 4 | 4 | +0.2845 | +0.2962 |
+| starve-C4 | 5 | 5 | 2 | +0.4137 | +0.3477 |
 
-Both tiers rank identically: protect-C < uniform < {protect-A6 at 6-bit} <
-starve-C. protect-C beats uniform by 0.114 nats at 6-bit and 0.168 nats at
-4-bit -- the gap growing as the grid coarsens, matching stage 1. starve-C
-is worst or near-worst at both tiers, as the hypothesis predicts.
-
-The full 6-bit tier is now replicated at seed 1, and the ranking is
-identical to seed 0:
-
-| arm | val loss (s0) | val loss (s1) |
-| --- | --- | --- |
-| protect-C6 | 4.3626 | 4.3599 |
-| uniform6 | 4.4771 | 4.4060 |
-| protect-A6 | 4.4835 | 4.5855 |
-| starve-C6 | 4.5425 | 4.6496 |
-
-`protect-C6 < uniform6 < protect-A6 < starve-C6` holds at both seeds. The
-protect-C6-vs-uniform6 gap is -0.1145 at seed 0 and -0.0461 at seed 1 --
-same direction, different magnitude; the fp32 control itself moved 0.11
-nats between seeds (4.2354 to 4.3455), so some of that swing is measurement
-noise rather than the effect shrinking. Two-seed rank replication across
-all four 6-bit arms is a real result; the exact magnitude is not yet
-pinned down. 4-bit tier seed 1 (uniform4, protect-C4, starve-C4) is at
-~85-90% and still running.
+The rank order `protect-C < uniform < protect-A6 (6-bit only) < starve-C`
+holds at BOTH seeds, BOTH tiers, with no exceptions. That is the actual
+result: allocation direction replicates cleanly even where the exact
+penalty magnitude does not -- uniform6 and protect-C6 both trained
+noticeably closer to their control at seed 1 than seed 0, while
+protect-A6/starve-C6/uniform4/starve-C4 stayed roughly stable across
+seeds. Given that magnitude noise, this study should be read for direction
+(protecting C specifically helps, any other allocation does not) rather
+than for a precise "beats by Nx" number -- stage 1's larger, cleaner gap
+was itself likely on the favourable end of the same noise band.
 
 ## Stage 3 (2026-09-19, Modal) -- complete, one seed
 
