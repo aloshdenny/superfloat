@@ -95,32 +95,44 @@ Early, partial, seed-0-only numbers at the 6-bit tier:
 | protect-C6 | 5 | 5 | 8 | 4.3626 | +0.1273 |
 | protect-A6 | 8 | 5 | 5 | 4.4835 | +0.2481 |
 | uniform4 | 4 | 4 | 4 | 4.5198 | +0.2844 |
+| protect-C4 | 3 | 3 | 6 | 4.3516 | +0.1162 |
 
 protect-C6 beats uniform6 by 0.114 nats, same direction as stage 1's ~37x
 result. protect-A6 -- the "does any non-uniform allocation help" control --
-is now in too, and it is the WORST of the three quantized arms, slightly
-behind even uniform6. That is the sharper claim stage 1's design was built
-to isolate: it is not non-uniformity that helps, it is specifically
-protecting C. FOUR of the seven arms are in (starve-C6, protect-C4,
-starve-C4 still running); seed 1 has started on uniform6 and protect-C6.
-Do not cite the "beats by Nx" framing until starve-C6 and a second seed
+is now in too, and it is the WORST of the three quantized 6-bit arms,
+slightly behind even uniform6. protect-C4 (4-bit tier) beats uniform4 by
+0.168 nats, a larger gap than at the 6-bit tier, matching stage 1's own
+finding that the allocation effect grows as the grid coarsens. FIVE of the
+seven arms are in (starve-C6, starve-C4 still running); seed 1 has started
+on uniform6, protect-C6, starve-C6, uniform4, protect-C4.
+Do not cite the "beats by Nx" framing until starve-C6/starve-C4 and a
+second seed
 land.
 
-## Stage 3 progress (2026-09-19, Modal, in flight)
+## Stage 3 (2026-09-19, Modal) -- complete, one seed
 
-25M GPT-2-style, 4-bit tier only (`benchmarks/results/mixed_alloc_stage3.jsonl`),
-one seed so far:
+25M GPT-2-style, 4-bit tier only, all 5 cells done
+(`benchmarks/results/mixed_alloc_stage3.jsonl`):
 
 | arm | A | B | C | val loss | vs fp32 |
 | --- | --- | --- | --- | --- | --- |
+| protect-C4 | 3 | 3 | 6 | **5.0711** | **-0.2077** |
 | fp32 control | - | - | - | 5.2788 | - |
-| protect-C4 | 3 | 3 | 6 | 5.0711 | **-0.2077** |
+| uniform4 | 4 | 4 | 4 | 5.5281 | +0.2493 |
 | starve-C4 | 5 | 5 | 2 | 5.6533 | +0.3745 |
+| protect-A4 | 6 | 3 | 3 | 5.7376 | +0.4588 |
 
-starve-C4 is worse than the control, as expected. protect-C4 is not just
-better than uniform4 (not yet run at this size) -- it is better than the
-fp32 control itself. One seed, so this could be noise or a genuinely lucky
-draw rather than SF4 regularising away real overfitting; it should not be
-read as "SF4 beats fp32" until uniform4 and a second seed land and the gap
-survives. Flagged here rather than smoothed over because it is the kind of
-number that is easy to misquote out of context.
+Full ranking, best to worst: protect-C4 < fp32 < uniform4 < starve-C4 <
+protect-A4. Two things hold at this scale that stage 1's design was built
+to distinguish: (1) protect-C4 beats uniform4 by 0.457 nats, the
+allocation-over-bit-count claim, replicated at 25M; (2) protect-A4 --
+"does any non-uniform split help" -- is not just worse than protect-C4, it
+is the SINGLE WORST arm, worse even than starve-C4. Non-uniformity alone
+does not help; protecting C specifically does, and protecting the wrong
+group (A, at C's expense) is actively worse than uniform.
+
+protect-C4 beating the fp32 control itself is still one seed -- flagged,
+not claimed as "SF4 beats fp32" until a second seed lands. But it is no
+longer an isolated number next to a lone starve-C4 point; it is the top of
+a complete, monotonic 5-arm ranking that lines up with every prediction
+the group-allocation hypothesis makes.
