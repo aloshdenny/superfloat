@@ -94,14 +94,15 @@ Early, partial, seed-0-only numbers at the 6-bit tier:
 | uniform6 | 6 | 6 | 6 | 4.4771 | +0.2417 |
 | protect-C6 | 5 | 5 | 8 | 4.3626 | +0.1273 |
 | protect-A6 | 8 | 5 | 5 | 4.4835 | +0.2481 |
+| uniform4 | 4 | 4 | 4 | 4.5198 | +0.2844 |
 
 protect-C6 beats uniform6 by 0.114 nats, same direction as stage 1's ~37x
 result. protect-A6 -- the "does any non-uniform allocation help" control --
 is now in too, and it is the WORST of the three quantized arms, slightly
 behind even uniform6. That is the sharper claim stage 1's design was built
 to isolate: it is not non-uniformity that helps, it is specifically
-protecting C. Still ONE seed and THREE of the seven planned arms
-(starve-C6 running now; the 4-bit tier and a second seed have not started).
+protecting C. FOUR of the seven arms are in (starve-C6, protect-C4,
+starve-C4 still running); seed 1 has started on uniform6 and protect-C6.
 Do not cite the "beats by Nx" framing until starve-C6 and a second seed
 land.
 

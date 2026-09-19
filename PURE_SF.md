@@ -64,45 +64,83 @@ a ceiling.
 
 ---
 
-## 3. What this means for a build
+## 3. From scratch, the residual renorm bounds the residual and nothing else
+
+`psd.py`'s granularity ablation is PTQ on a pretrained model. `puresf_llm.py`
+asks the harder version: train an 11M RMSNorm/SwiGLU/GQA model from scratch
+with weights, activations, AND the residual stream all SF8, using the
+`a8tok_rtok` recipe above plus periodic residual renormalisation (divide the
+residual stream by its own per-token max every `renorm_every` blocks --
+sound because every downstream read goes through a norm, so `RMSNorm(x/s) ==
+RMSNorm(x)`). Sweeping the interval on the same 11M/200M-token config
+(`puresf_llm.jsonl`) isolates what the mechanism actually fixes:
+
+| renorm_every | val loss | max residual | max layer output | audit pass |
+| --- | --- | --- | --- | --- |
+| 4 | 4.2632 | 6.27 | 4.42 | no |
+| 2 | 4.2570 | 4.30 | 4.76 | no |
+| 1 | 4.2632 | **1.00** | 4.74 | no |
+
+Renorming every block pins the residual stream at exactly the SF bound, as
+designed -- that half of the problem is solved. `max_layer_output` does not
+move with it (4.42 to 4.76, no trend), because nothing in the mechanism
+touches it: it is the *output* of `down_proj` (or `gate_proj`, per-layer)
+before that value is added to the residual, and no norm or clamp sits
+between the matmul and that addition. This is the literal Atreides
+requirement PURE_SF.md opened with -- saturate the FMA result itself, not
+just the operands -- and it is still missing. The residual renorm was never
+going to close it; it closes a different half of the same audit.
+
+---
+
+## 4. What this means for a build
 
 - A weights-only SF8 number is not a datapath number. Quote it as
   mixed-precision PTQ.
 - If every register write must be SF, budget a per-token scale (or
   accept a dead model). Do not expect tensor/channel activation scales
   to substitute.
+- The residual renorm from section 3 is necessary but not sufficient: it
+  bounds the residual stream, not the per-matmul output that feeds it. A
+  build needs both, and only the first exists right now.
 - From-scratch 1B QAT on the Llama-3.2-1B shape (`train_1b.py`, SF8
-  `ln_all`, embeddings and tied head in bf16) is the scale-up of this
-  question. It is in flight on a home 4090. No val number is archived,
-  and there is no matched bf16 control yet.
+  `ln_all`, embeddings and tied head in bf16) is the scale-up of the
+  section-1 question. In flight on Modal H100 (a prior attempt on a home
+  4090 never produced an archived val). bf16 control and SF8 arm are both
+  training now, ~40k / ~15k tok/s respectively, 20B-token budget.
 
 ---
 
-## 4. What is not established
+## 5. What is not established
 
 - **Eval_n=8** on the PTQ table. Direction is not in doubt; the 0.02-nat
   gaps are.
 - **Softmax / attention logits left in fp32** on the QAT run (`o_s`,
   `a_p` off). A fully-saturated attention datapath was PTQ-probed and
   is worse; it was not QAT'd.
-- **No 1B val.** `train_1b.py` writes `ckpt/latest.pt` locally. That
-  checkpoint is not in this repository.
-- **No matched bf16 1B control.** Do not claim QAT recovered 1B until
-  that row exists.
+- **The matmul-output saturation gap (section 3).** Three renorm
+  frequencies, one architecture, one size, one seed. Whether hard-clamping
+  `down_proj`/`gate_proj` output itself (rather than just its norm-fed
+  input) closes `max_layer_output` is untested, not just unsolved.
+- **No 1B val yet.** Training in progress on Modal; no completed row.
+- **No matched bf16 1B control yet.** Same run, in progress alongside it.
 
 ---
 
-## 5. Files
+## 6. Files
 
 ```
 benchmarks/lab/
   psd.py          named-site Llama block, granularity sweep, census, QAT
   psd_data.py     FineWeb / tool-mix loaders for the 360M runs
+  puresf_llm.py   11M from-scratch, weights+activations+residual all SF8,
+                  residual-renorm-interval sweep, section 3
   train_1b.py     Llama-3.2-1B from-scratch QAT, uint32 shards
 benchmarks/results/
   psd_census.jsonl   activation dynamic range by site
   psd_ptq.jsonl      18 PTQ arms, section 1
   psd_qat.jsonl      1 QAT run, 2M tokens, section 2
+  puresf_llm.jsonl   renorm-interval sweep, section 3
 ```
 
 ```bash
@@ -110,6 +148,7 @@ cd benchmarks/lab
 python psd.py --census
 python psd.py --ptq
 python psd.py --qat --name a8tok_sdpa --tokens 2000000 --seed 0
+python puresf_llm.py --arm sf8_full --renorm-every 1 --tokens 200000000
 ```
 
 The Llama 3 tokenizer vocabulary is 128256. That does not fit in
