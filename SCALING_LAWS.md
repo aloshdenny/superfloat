@@ -628,6 +628,41 @@ the seed spread reported elsewhere, so it is recorded rather than claimed.
 
 ![regularisation](benchmarks/figures/lab_exp3_regularisation.png)
 
+**The 11M sweep (`exp3_11m.py`), now run.** Same D/N grid, scale absorption,
+one seed per cell, penalty against each row's own FP32 control:
+
+| D/N | tokens | FP32 loss | SF2 | SF3 | SF4 | SF6 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 5 | 47M | 7.033 | +0.214 | +0.188 | +0.188 | +0.000 |
+| 10 | 95M | 6.415 | **+0.112** | **+0.168** | **+0.239** | -0.010 |
+| 20 | 190M | 5.706 | +0.519 | +0.510 | +0.424 | +0.074 |
+| 40 | 426M | 4.728 | +0.780 | +0.755 | +0.454 | -0.038 |
+
+4.1's inversion -- SF2 closest to FP32, SF4 furthest, among the three -- shows
+up at exactly one of the four rows: D/N = 10, where SF2 < SF3 < SF4 in penalty,
+monotonic and by a clear margin (0.127 nats, SF2 to SF4). Every other row
+orders normally, finer beats coarser, with D/N = 40 the least ambiguous of
+the three (SF4 beats SF2 by 0.326 nats).
+
+This is not the clean picture either side of the open question predicted.
+"The inversion reproduces at 11M" is wrong: it is absent at D/N = 5, 20, and
+40. "It does not reproduce at 11M, only at some other size" is also wrong:
+it is present, monotonically, at D/N = 10. The regularisation hypothesis's
+specific prediction -- that the inversion should *weaken* as tokens-per-
+parameter grows -- is not what this shows either; weakening implies a
+monotonic fade, and instead the effect appears in the middle of the sweep
+and is gone on both sides of it. Whatever governs the inversion is not a
+simple function of D/N over this range.
+
+Read this cautiously. Unlike 4.1 itself, which needed three seeds (exp8) to
+separate a real 0.085-nat gap from a 0.047-nat single-seed spread, every row
+here is one seed. The D/N = 10 gap (0.127 nats) is larger than exp8's
+verified gap, which argues against pure noise, but the D/N = 5 near-tie
+between SF3 and SF4 (0.188 vs 0.188) shows how easily a single seed could
+flip a row's ordering. This table is a first pass at the D/N axis, not a
+closed answer -- the honest update to the open question is "the inversion
+is not monotonic in D/N at 11M," not "here is where it lives."
+
 ### 5.5 Depth does not move the critical precision; it lowers the penalty
 
 Tier C varied width and found the precision requirement rising with it. Depth
@@ -711,10 +746,16 @@ as a property of the format.
 - **The inverted precision ordering under scale absorption** (4.1) is measured
   at one architecture and one size. It now replicates across hardware and
   implementations (experiment 8, every cell within 0.016 nats), so it is not a
-  measurement artefact; what remains unexplained is the mechanism. The
-  regularisation hypothesis predicts it should weaken as tokens-per-parameter
-  grows, and 5.4 could not test that because it ran at 5M where no inversion
-  exists. Sweeping D/N at 11M is the open item.
+  measurement artefact; what remains unexplained is the mechanism. The D/N
+  sweep at 11M this bullet used to call for is now run (5.4): the inversion
+  is not a monotonic function of tokens-per-parameter over D/N = 5-40 as the
+  regularisation hypothesis's "weakens with more tokens" prediction implied
+  -- it is absent at D/N = 5, present and monotonic at D/N = 10, and absent
+  again at 20 and 40. One seed per D/N point, so this shape itself needs the
+  3-seed treatment exp8 gave the original 4.1 cell before it can be trusted
+  as more than a single favourable seed at D/N = 10. The open item is now
+  narrower and sharper: not "does it reproduce at 11M" (yes, in one row) but
+  "what non-D/N variable turns it on and off between D/N = 5 and 10."
 - **PTQ under scale absorption** was never run. Given SF4 PTQ destroys every
   model tested, it is the obvious next experiment.
 - **Activation quantization** is out of scope for the four tiers; 5.1 measures
