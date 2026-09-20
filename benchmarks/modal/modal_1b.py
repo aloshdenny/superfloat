@@ -14,7 +14,7 @@ A-D ladder.
 Run:
     modal run modal/modal_1b.py::probe                  # throughput, ~2 min
     modal run modal/modal_1b.py::prepare --tokens 8000000000
-    modal run modal/modal_1b.py::launch                 # bf16 control + sf8 ln_all
+    modal deploy modal/modal_1b.py; modal run modal/modal_1b.py::launch   # after prepare is DONE
 """
 import pathlib
 
@@ -79,43 +79,74 @@ def prepare(tokens: int = 8_000_000_000):
 
 @app.function(image=image, gpu=GPU, volumes={"/vol": vol}, secrets=[hf_secret],
               timeout=24 * 60 * 60)
-def train_arm(bits: int, mode: str, tokens: int, seed: int = 0, wait_tokens: int = 50_000_000):
-    import os, subprocess, threading
+def train_arm(bits: int, mode: str, tokens: int, seed: int = 0, chain: int = 0,
+              max_chain: int = 14):
+    """One <=23h leg of a multi-day run. Resumes from ckpt/latest.pt, and if
+    the wall-clock guard stops it before the token budget is reached, spawns
+    the next leg itself, so a 6-day run survives Modal's 24h function ceiling
+    without any local process babysitting it.
+
+    Two things the first attempt at this got wrong, both fatal:
+      * no vol.reload(): a container only sees another container's committed
+        files after reloading the volume, so a training container that
+        started while prepare was still writing shards trained on shard 0
+        alone for 24h (~30 epochs over 96M tokens -> train loss 0.95, val
+        loss 5.6: memorisation, not pretraining).
+      * timeout=24h with no resume chain: the run simply stopped at 24.0h.
+    """
+    import os, subprocess, sys, threading
+    vol.reload()
+
+    # refuse to start on a partial corpus, ever again
+    sys.path.insert(0, "/root/sfx_bench/lab"); sys.path.insert(0, "/root/sfx_bench")
+    from train_1b import tokens_ready
+    have = tokens_ready(DATA)
+    if have < tokens:
+        raise RuntimeError(
+            f"corpus incomplete: {have/1e9:.2f}B tokens ready, run needs {tokens/1e9:.2f}B; "
+            f"finish ::prepare before launching train_arm")
+
     stop = threading.Event()
 
     def periodic_commit():
         while not stop.wait(300):
             vol.commit()
-    t = threading.Thread(target=periodic_commit, daemon=True)
-    t.start()
+    threading.Thread(target=periodic_commit, daemon=True).start()
 
     tag = ("bf16" if bits == 0 else f"sf{bits}_{mode}") + f"_s{seed}"
     out = f"{OUT_ROOT}/{tag}"
     os.makedirs(out, exist_ok=True)
-    args = ["python", "train_1b.py", "--data", DATA, "--out", out,
+    args = ["timeout", "-s", "TERM", "23h",
+            "python", "train_1b.py", "--data", DATA, "--out", out,
             "--bits", str(bits), "--mode", mode, "--tokens", str(tokens),
-            "--seed", str(seed), "--wait-tokens", str(wait_tokens)]
-    print(f"[runner] {' '.join(args)}", flush=True)
+            "--seed", str(seed), "--wait-tokens", str(tokens)]
+    print(f"[runner] leg {chain}: {' '.join(args)}", flush=True)
     proc = subprocess.run(args, cwd="/root/sfx_bench/lab", env=_env())
     stop.set()
     vol.commit()
+
+    if proc.returncode == 124:
+        # wall-clock guard fired: train_1b.py caught SIGTERM, checkpointed,
+        # and exited; this leg is done but the run is not.
+        if chain + 1 >= max_chain:
+            raise RuntimeError(f"{tag}: hit max_chain={max_chain} legs without finishing")
+        nxt = train_arm.spawn(bits=bits, mode=mode, tokens=tokens, seed=seed,
+                              chain=chain + 1, max_chain=max_chain)
+        print(f"[runner] {tag} leg {chain} timed out cleanly; spawned leg {chain+1} "
+              f"({nxt.object_id})", flush=True)
+        return {"tag": tag, "leg": chain, "status": "continued", "next": nxt.object_id}
     if proc.returncode != 0:
-        raise RuntimeError(f"{tag} exited {proc.returncode}")
-    return {"tag": tag, "returncode": proc.returncode}
+        raise RuntimeError(f"{tag} leg {chain} exited {proc.returncode}")
+    print(f"[runner] {tag} DONE after {chain+1} leg(s)", flush=True)
+    return {"tag": tag, "leg": chain, "status": "done"}
 
 
 @app.local_entrypoint()
-def launch(tokens: int = 8_000_000_000, seed: int = 0):
-    """bf16 control + SF8 ln_all arm, in parallel. Data must already be
-    prepared (run ::prepare first, or launch handles a slow initial ramp
-    since train_arm itself waits on wait_tokens before starting)."""
-    print("spawning bf16 control + sf8_ln_all", flush=True)
-    handles = [
-        train_arm.spawn(bits=0, mode="ln_all", tokens=tokens, seed=seed),
-        train_arm.spawn(bits=8, mode="ln_all", tokens=tokens, seed=seed),
-    ]
-    for h in handles:
-        try:
-            print(h.get(), flush=True)
-        except Exception as exc:                          # noqa: BLE001
-            print(f"  run failed: {str(exc)[:200]}", flush=True)
+def launch(tokens: int = 20_000_000_000, seed: int = 0):
+    """Fire-and-forget: spawns the bf16 control and the SF8 ln_all arm and
+    returns immediately. Each arm chains its own legs from there. Requires
+    ::prepare to have finished for the full `tokens` budget first (train_arm
+    refuses a partial corpus)."""
+    for bits in (0, 8):
+        h = train_arm.spawn(bits=bits, mode="ln_all", tokens=tokens, seed=seed)
+        print(f"spawned bits={bits}: {h.object_id}", flush=True)
