@@ -48,13 +48,14 @@ def _env():
 
 
 @app.function(image=image, gpu=GPU, volumes={"/vol": vol}, secrets=[hf_secret], timeout=20 * 60)
-def probe(bits: int = 0, mode: str = "ln_all"):
+def probe(bits: int = 0, mode: str = "ln_all", seqlen: int = 2048, batch: int = 2, accum: int = 8):
     """Confirms gated-tokenizer access and measures real tok/s before any
     prepare/train spend -- do not guess a token budget, measure it."""
     import os, subprocess
     os.makedirs(DATA, exist_ok=True)
     args = ["python", "train_1b.py", "--data", DATA, "--out", "/tmp/sf1b_probe",
-            "--bits", str(bits), "--mode", mode, "--probe", "--no-resume", "--no-compile"]
+            "--bits", str(bits), "--mode", mode, "--probe", "--no-resume", "--no-compile",
+            "--seqlen", str(seqlen), "--batch", str(batch), "--accum", str(accum)]
     print(f"[probe] tokenizer access check + throughput: {' '.join(args)}", flush=True)
     proc = subprocess.run(args, cwd="/root/sfx_bench/lab", env=_env())
     return {"returncode": proc.returncode}
@@ -80,7 +81,7 @@ def prepare(tokens: int = 8_000_000_000):
 @app.function(image=image, gpu=GPU, volumes={"/vol": vol}, secrets=[hf_secret],
               timeout=24 * 60 * 60)
 def train_arm(bits: int, mode: str, tokens: int, seed: int = 0, chain: int = 0,
-              max_chain: int = 14):
+              max_chain: int = 14, seqlen: int = 2048, batch: int = 2, accum: int = 8):
     """One <=23h leg of a multi-day run. Resumes from ckpt/latest.pt, and if
     the wall-clock guard stops it before the token budget is reached, spawns
     the next leg itself, so a 6-day run survives Modal's 24h function ceiling
@@ -113,13 +114,14 @@ def train_arm(bits: int, mode: str, tokens: int, seed: int = 0, chain: int = 0,
             vol.commit()
     threading.Thread(target=periodic_commit, daemon=True).start()
 
-    tag = ("bf16" if bits == 0 else f"sf{bits}_{mode}") + f"_s{seed}"
+    tag = ("bf16" if bits == 0 else f"sf{bits}_{mode}") + f"_s{seed}_L{seqlen}"
     out = f"{OUT_ROOT}/{tag}"
     os.makedirs(out, exist_ok=True)
     args = ["timeout", "-s", "TERM", "23h",
             "python", "train_1b.py", "--data", DATA, "--out", out,
             "--bits", str(bits), "--mode", mode, "--tokens", str(tokens),
-            "--seed", str(seed), "--wait-tokens", str(tokens)]
+            "--seed", str(seed), "--wait-tokens", str(tokens),
+            "--seqlen", str(seqlen), "--batch", str(batch), "--accum", str(accum)]
     print(f"[runner] leg {chain}: {' '.join(args)}", flush=True)
     proc = subprocess.run(args, cwd="/root/sfx_bench/lab", env=_env())
     stop.set()
@@ -131,7 +133,8 @@ def train_arm(bits: int, mode: str, tokens: int, seed: int = 0, chain: int = 0,
         if chain + 1 >= max_chain:
             raise RuntimeError(f"{tag}: hit max_chain={max_chain} legs without finishing")
         nxt = train_arm.spawn(bits=bits, mode=mode, tokens=tokens, seed=seed,
-                              chain=chain + 1, max_chain=max_chain)
+                              chain=chain + 1, max_chain=max_chain,
+                              seqlen=seqlen, batch=batch, accum=accum)
         print(f"[runner] {tag} leg {chain} timed out cleanly; spawned leg {chain+1} "
               f"({nxt.object_id})", flush=True)
         return {"tag": tag, "leg": chain, "status": "continued", "next": nxt.object_id}
@@ -142,11 +145,13 @@ def train_arm(bits: int, mode: str, tokens: int, seed: int = 0, chain: int = 0,
 
 
 @app.local_entrypoint()
-def launch(tokens: int = 20_000_000_000, seed: int = 0):
+def launch(tokens: int = 20_000_000_000, seed: int = 0, seqlen: int = 2048,
+           batch: int = 2, accum: int = 8):
     """Fire-and-forget: spawns the bf16 control and the SF8 ln_all arm and
     returns immediately. Each arm chains its own legs from there. Requires
     ::prepare to have finished for the full `tokens` budget first (train_arm
     refuses a partial corpus)."""
     for bits in (0, 8):
-        h = train_arm.spawn(bits=bits, mode="ln_all", tokens=tokens, seed=seed)
+        h = train_arm.spawn(bits=bits, mode="ln_all", tokens=tokens, seed=seed,
+                            seqlen=seqlen, batch=batch, accum=accum)
         print(f"spawned bits={bits}: {h.object_id}", flush=True)
