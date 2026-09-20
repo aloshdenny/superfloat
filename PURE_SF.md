@@ -105,9 +105,12 @@ going to close it; it closes a different half of the same audit.
   build needs both, and only the first exists right now.
 - From-scratch 1B QAT on the Llama-3.2-1B shape (`train_1b.py`, SF8
   `ln_all`, embeddings and tied head in bf16) is the scale-up of the
-  section-1 question. In flight on Modal H100 (a prior attempt on a home
-  4090 never produced an archived val). bf16 control and SF8 arm are both
-  training now, ~40k / ~15k tok/s respectively, 20B-token budget.
+  section-1 question. A prior attempt on a home 4090 never produced an
+  archived val; the first Modal attempt is the shard-0-only run described
+  in section 5 (SF8 tracks bf16 exactly, but not a pretraining number).
+  The corrected rerun is queued behind corpus preparation on Modal; the
+  measured H100 throughput is ~40k tok/s (bf16) and ~36k tok/s (SF8,
+  compiled), i.e. ~3.3 days for both arms at a 10B-token budget.
 
 ---
 
