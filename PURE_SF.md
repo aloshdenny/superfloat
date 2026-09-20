@@ -122,8 +122,21 @@ going to close it; it closes a different half of the same audit.
   frequencies, one architecture, one size, one seed. Whether hard-clamping
   `down_proj`/`gate_proj` output itself (rather than just its norm-fed
   input) closes `max_layer_output` is untested, not just unsolved.
-- **No 1B val yet.** Training in progress on Modal; no completed row.
-- **No matched bf16 1B control yet.** Same run, in progress alongside it.
+- **No 1B val at a real token budget yet.** The first Modal attempt trained
+  both arms on a single 100M-token shard for 24h (a `vol.reload()` omission;
+  the training containers never saw the other 199 shards) -- ~30 epochs over
+  96M tokens, val ppl bottoming at 48.5 near 3.5 epochs and then tripling.
+  It is a memorisation run, not pretraining, and its final losses are not
+  quotable. It does establish one thing cleanly, because both arms saw the
+  identical data in the identical order: **SF8 `ln_all` and bf16 are
+  indistinguishable at the 1B shape** -- train ppl agrees to two decimals at
+  every logged step over 80k steps, val ppl within 1% through the clean
+  single-pass first epoch (154.3 vs 154.5 at 66M tokens) and within 4% even
+  deep into overfitting; at the val minimum SF8 is marginally ahead (48.51 vs
+  48.68). `sf1b_run0_*.jsonl`, `lab_sf1b_run0_ppl.png`. The corrected run
+  (full corpus on disk before start, self-chaining across the 24h ceiling)
+  is what will supply the archived number.
+- **No matched bf16 1B control at a real budget yet.** Same rerun.
 
 ---
 
@@ -141,6 +154,7 @@ benchmarks/results/
   psd_ptq.jsonl      18 PTQ arms, section 1
   psd_qat.jsonl      1 QAT run, 2M tokens, section 2
   puresf_llm.jsonl   renorm-interval sweep, section 3
+  sf1b_run0_*.jsonl  first 1B attempt, shard-0-only (see section 5); SF8 vs bf16 tracking
 ```
 
 ```bash
