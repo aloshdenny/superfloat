@@ -79,7 +79,8 @@ def prepare(tokens: int = 8_000_000_000):
 
 
 @app.function(image=image, gpu=GPU, volumes={"/vol": vol}, secrets=[hf_secret],
-              timeout=24 * 60 * 60)
+              timeout=24 * 60 * 60,
+              retries=modal.Retries(max_retries=5, initial_delay=60.0, backoff_coefficient=1.0))
 def train_arm(bits: int, mode: str, tokens: int, seed: int = 0, chain: int = 0,
               max_chain: int = 14, seqlen: int = 2048, batch: int = 2, accum: int = 8):
     """One <=23h leg of a multi-day run. Resumes from ckpt/latest.pt, and if
@@ -94,6 +95,12 @@ def train_arm(bits: int, mode: str, tokens: int, seed: int = 0, chain: int = 0,
         alone for 24h (~30 epochs over 96M tokens -> train loss 0.95, val
         loss 5.6: memorisation, not pretraining).
       * timeout=24h with no resume chain: the run simply stopped at 24.0h.
+
+    Planned end-of-leg (the 23h SIGTERM guard) -> spawn the next leg.
+    Unplanned death (preemption, OOM-kill, anything that kills the container
+    before this code can run) -> Modal `retries` re-executes THIS leg with the
+    same args, and train_1b.py --resume picks up ckpt/latest.pt. Either way
+    at most ~10 minutes (ckpt-seconds=600) of progress is repeated.
     """
     import os, subprocess, sys, threading
     vol.reload()
@@ -121,7 +128,8 @@ def train_arm(bits: int, mode: str, tokens: int, seed: int = 0, chain: int = 0,
             "python", "train_1b.py", "--data", DATA, "--out", out,
             "--bits", str(bits), "--mode", mode, "--tokens", str(tokens),
             "--seed", str(seed), "--wait-tokens", str(tokens),
-            "--seqlen", str(seqlen), "--batch", str(batch), "--accum", str(accum)]
+            "--seqlen", str(seqlen), "--batch", str(batch), "--accum", str(accum),
+            "--ckpt-every", "200", "--ckpt-seconds", "600", "--ckpt-keep-every", "10000"]
     print(f"[runner] leg {chain}: {' '.join(args)}", flush=True)
     proc = subprocess.run(args, cwd="/root/sfx_bench/lab", env=_env())
     stop.set()
@@ -142,6 +150,30 @@ def train_arm(bits: int, mode: str, tokens: int, seed: int = 0, chain: int = 0,
         raise RuntimeError(f"{tag} leg {chain} exited {proc.returncode}")
     print(f"[runner] {tag} DONE after {chain+1} leg(s)", flush=True)
     return {"tag": tag, "leg": chain, "status": "done"}
+
+
+@app.function(image=image, volumes={"/vol": vol}, timeout=24 * 60 * 60)
+def launch_when_ready(tokens: int = 20_000_000_000, seed: int = 0, seqlen: int = 8192,
+                      batch: int = 2, accum: int = 8, poll_s: int = 300):
+    """CPU-only. Polls the volume until the full corpus is on disk, then spawns
+    both arms. Runs on Modal so the launch survives any local disconnect."""
+    import sys, time
+    sys.path.insert(0, "/root/sfx_bench/lab"); sys.path.insert(0, "/root/sfx_bench")
+    from train_1b import tokens_ready
+    while True:
+        vol.reload()
+        have = tokens_ready(DATA)
+        print(f"[launch] corpus {have/1e9:.2f}B / {tokens/1e9:.2f}B", flush=True)
+        if have >= tokens:
+            break
+        time.sleep(poll_s)
+    ids = {}
+    for bits in (0, 8):
+        h = train_arm.spawn(bits=bits, mode="ln_all", tokens=tokens, seed=seed,
+                            seqlen=seqlen, batch=batch, accum=accum)
+        ids[bits] = h.object_id
+        print(f"[launch] spawned bits={bits} seqlen={seqlen}: {h.object_id}", flush=True)
+    return ids
 
 
 @app.local_entrypoint()
