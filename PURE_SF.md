@@ -105,12 +105,12 @@ going to close it; it closes a different half of the same audit.
   build needs both, and only the first exists right now.
 - From-scratch 1B QAT on the Llama-3.2-1B shape (`train_1b.py`, SF8
   `ln_all`, embeddings and tied head in bf16) is the scale-up of the
-  section-1 question. A prior attempt on a home 4090 never produced an
-  archived val; the first Modal attempt is the shard-0-only run described
-  in section 5 (SF8 tracks bf16 exactly, but not a pretraining number).
-  The corrected rerun is queued behind corpus preparation on Modal; the
-  measured H100 throughput is ~40k tok/s (bf16) and ~36k tok/s (SF8,
-  compiled), i.e. ~3.3 days for both arms at a 10B-token budget.
+  section-1 question. It is now measured: at 8K over 6.4B matched tokens
+  SF8 and bf16 are indistinguishable, and the 8K -> 32K -> 128K context
+  ladder costs SF8 a flat ~1% rather than a compounding penalty
+  (section 5). Chunked cross-entropy is what makes the long rungs fit --
+  full-sequence fp32 logits are 16.8 GiB at 32K and 67 GiB at 128K, which
+  OOMs an 80 GiB H100 before attention is the constraint.
 
 ---
 
