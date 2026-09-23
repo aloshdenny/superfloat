@@ -122,7 +122,7 @@ class Llama(nn.Module):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx):
+    def hidden(self, idx):
         T = idx.shape[1]
         x = self.embed_tokens(idx)
         cos = self.cos[:, :, :T].to(dtype=x.dtype)
@@ -133,7 +133,10 @@ class Llama(nn.Module):
                                                       use_reentrant=False)
             else:
                 x = blk(x, cos, sin)
-        return self.lm_head(self.norm(x))
+        return self.norm(x)
+
+    def forward(self, idx):
+        return self.lm_head(self.hidden(idx))
 
 
 class SFLinear(nn.Linear):
@@ -440,6 +443,36 @@ def append_jsonl(path, rec):
         os.fsync(f.fileno())
 
 
+def chunked_ce(model, x, y, chunk=4096, vocab=CFG["vocab"]):
+    """Cross-entropy without ever materialising full-sequence fp32 logits.
+
+    At 32K context the logits alone are 32768 x 128256 x 4 B = 16.8 GiB in
+    fp32, which OOMs an 80 GiB H100 before attention is even the issue. Split
+    the sequence into chunks and checkpoint each chunk's head+CE so backward
+    recomputes it: peak head memory becomes one chunk instead of the whole
+    sequence, at the cost of one extra head matmul per chunk.
+    """
+    h = model.hidden(x)
+    T = y.shape[1]
+    head = model.lm_head
+
+    def chunk_loss(hc, yc):
+        lg = head(hc)
+        return F.cross_entropy(lg.reshape(-1, vocab).float(), yc.reshape(-1),
+                               reduction="sum")
+
+    total = None
+    for i in range(0, T, chunk):
+        hc, yc = h[:, i:i + chunk], y[:, i:i + chunk]
+        if model.training:
+            part = torch.utils.checkpoint.checkpoint(chunk_loss, hc, yc,
+                                                     use_reentrant=False)
+        else:
+            part = chunk_loss(hc, yc)
+        total = part if total is None else total + part
+    return total / y.numel()
+
+
 @torch.no_grad()
 def evaluate(model, mix, batch, n=16, vocab=CFG["vocab"]):
     was = model.training
@@ -450,9 +483,9 @@ def evaluate(model, mix, batch, n=16, vocab=CFG["vocab"]):
     for i in range(n):
         x, y = mix.val(batch, i)
         with amp:
-            lg = model(x)
-            loss = lf(lg.reshape(-1, vocab).float(), y.reshape(-1))
-            acc = (lg.argmax(-1) == y).float().mean()
+            loss = chunked_ce(model, x, y, vocab=vocab)
+            w = min(y.shape[1], 4096)
+            acc = (model.lm_head(model.hidden(x[:, :w])).argmax(-1) == y[:, :w]).float().mean()
         tot_loss += float(loss)
         tot_acc += float(acc)
     model.train(was)
@@ -584,13 +617,13 @@ def train(args):
         for _ in range(3):
             x, y = mix.train(args.batch)
             with amp:
-                lf(model(x).reshape(-1, CFG["vocab"]).float(), y.reshape(-1)).backward()
+                chunked_ce(model, x, y).backward()
             opt.zero_grad(set_to_none=True)
         torch.cuda.synchronize(); t0 = time.time(); K = 10
         for _ in range(K):
             x, y = mix.train(args.batch)
             with amp:
-                lf(model(x).reshape(-1, CFG["vocab"]).float(), y.reshape(-1)).backward()
+                chunked_ce(model, x, y).backward()
             opt.step(); opt.zero_grad(set_to_none=True)
         torch.cuda.synchronize()
         dt = (time.time() - t0) / K
@@ -618,15 +651,20 @@ def train(args):
         for mi in range(args.accum):
             x, y = mix.train(args.batch)
             with amp:
-                lg = model(x)
-                loss = lf(lg.reshape(-1, CFG["vocab"]).float(), y.reshape(-1))
+                loss = chunked_ce(model, x, y)
             (loss / args.accum).backward()
             loss_sum = loss.detach() if loss_sum is None else loss_sum + loss.detach()
             if want_acc:
+                # accuracy needs argmax over the full head; at long context that
+                # is the same tensor chunked_ce exists to avoid, so measure it on
+                # a single leading chunk rather than the whole sequence.
                 with torch.no_grad():
-                    a = (lg.argmax(-1) == y).float().mean()
+                    w = min(y.shape[1], 4096)
+                    lg_a = model.lm_head(model.hidden(x[:, :w]))
+                    a = (lg_a.argmax(-1) == y[:, :w]).float().mean()
+                    del lg_a
                     acc_sum = a if acc_sum is None else acc_sum + a
-            del lg, loss, x, y
+            del loss, x, y
             if verbose:
                 print(f"[{tag}] step {step} accum {mi+1}/{args.accum}", flush=True)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
