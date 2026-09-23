@@ -187,3 +187,74 @@ def launch(tokens: int = 20_000_000_000, seed: int = 0, seqlen: int = 2048,
         h = train_arm.spawn(bits=bits, mode="ln_all", tokens=tokens, seed=seed,
                             seqlen=seqlen, batch=batch, accum=accum)
         print(f"spawned bits={bits}: {h.object_id}", flush=True)
+
+@app.function(image=image, volumes={"/vol": vol}, secrets=[hf_secret], timeout=6 * 60 * 60)
+def fetch_ckpt(repo_id: str = "aoxo/sf-scaling-laws",
+               files: str = "checkpoints/sf1b_8k/bf16_s0_L8192_step48900_latest.pt,"
+                            "checkpoints/sf1b_8k/sf8_ln_all_s0_L8192_step48500_latest.pt"):
+    """Pull archived checkpoints from HF into this workspace's volume.
+
+    Volumes do not cross Modal workspaces, so a run that has to move workspaces
+    goes out through HF and back in here. CPU-only; HF->Modal is fast."""
+    import os
+    from huggingface_hub import hf_hub_download
+    os.makedirs(f"{OUT_ROOT}/init", exist_ok=True)
+    out = []
+    for f in [x.strip() for x in files.split(",") if x.strip()]:
+        dest = f"{OUT_ROOT}/init/{os.path.basename(f)}"
+        if os.path.exists(dest):
+            print(f"[fetch] present: {dest} ({os.path.getsize(dest)/1e9:.1f} GB)", flush=True)
+            out.append(dest); continue
+        print(f"[fetch] {f}", flush=True)
+        p = hf_hub_download(repo_id=repo_id, filename=f, repo_type="dataset",
+                            token=os.environ.get("HF_TOKEN"))
+        os.replace(p, dest) if os.path.dirname(p) != os.path.dirname(dest) else None
+        if not os.path.exists(dest):
+            import shutil; shutil.copy(p, dest)
+        print(f"[fetch] -> {dest} ({os.path.getsize(dest)/1e9:.1f} GB)", flush=True)
+        out.append(dest)
+    vol.commit()
+    return out
+
+
+@app.function(image=image, gpu=GPU, volumes={"/vol": vol}, secrets=[hf_secret],
+              timeout=24 * 60 * 60,
+              retries=modal.Retries(max_retries=5, initial_delay=60.0, backoff_coefficient=1.0))
+def extend_arm(bits: int, init_ckpt: str, tokens: int, seqlen: int = 32768,
+               batch: int = 1, accum: int = 4, lr: float = 5e-5, mode: str = "ln_all",
+               seed: int = 0, chain: int = 0, max_chain: int = 6):
+    """Context-extension stage: load 8K-trained weights, continue at `seqlen`
+    with a fresh short cosine schedule at a lower peak LR."""
+    import os, subprocess, threading
+    vol.reload()
+    stop = threading.Event()
+
+    def periodic_commit():
+        while not stop.wait(300):
+            vol.commit()
+    threading.Thread(target=periodic_commit, daemon=True).start()
+
+    tag = ("bf16" if bits == 0 else f"sf{bits}_{mode}") + f"_s{seed}_ext{seqlen}"
+    out = f"{OUT_ROOT}/{tag}"
+    os.makedirs(out, exist_ok=True)
+    args = ["timeout", "-s", "TERM", "23h",
+            "python", "train_1b.py", "--data", DATA, "--out", out,
+            "--bits", str(bits), "--mode", mode, "--tokens", str(tokens),
+            "--seed", str(seed), "--wait-tokens", str(1_000_000_000),
+            "--seqlen", str(seqlen), "--batch", str(batch), "--accum", str(accum),
+            "--lr", str(lr), "--init-from", init_ckpt,
+            "--ckpt-every", "100", "--ckpt-seconds", "600", "--ckpt-keep-every", "100000"]
+    print(f"[ext] leg {chain}: {' '.join(args)}", flush=True)
+    proc = subprocess.run(args, cwd="/root/sfx_bench/lab", env=_env())
+    stop.set(); vol.commit()
+    if proc.returncode == 124:
+        if chain + 1 >= max_chain:
+            raise RuntimeError(f"{tag}: hit max_chain")
+        nxt = extend_arm.spawn(bits=bits, init_ckpt=init_ckpt, tokens=tokens, seqlen=seqlen,
+                               batch=batch, accum=accum, lr=lr, mode=mode, seed=seed,
+                               chain=chain + 1, max_chain=max_chain)
+        return {"tag": tag, "leg": chain, "status": "continued", "next": nxt.object_id}
+    if proc.returncode != 0:
+        raise RuntimeError(f"{tag} leg {chain} exited {proc.returncode}")
+    return {"tag": tag, "leg": chain, "status": "done"}
+

@@ -505,6 +505,22 @@ def train(args):
 
     start = 0
     tokens_seen = 0
+    if args.init_from:
+        # Context-extension / re-init stage: take the weights, drop the optimizer
+        # state and the step counter, so this run gets its own (short) cosine
+        # schedule at its own seqlen. RoPE cos/sin are non-persistent buffers, so
+        # they are rebuilt at the new length rather than loaded from the source.
+        blob = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        sd = clean_state_dict(blob["model"] if "model" in blob else blob)
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        src_step = blob.get("step", -1)
+        print(f"[{tag}] init-from {args.init_from}: loaded weights from step {src_step} "
+              f"(missing={len(missing)} unexpected={len(unexpected)}), fresh schedule at "
+              f"seqlen={args.seqlen}", flush=True)
+        if unexpected:
+            print(f"[{tag}] unexpected keys (first 5): {unexpected[:5]}", flush=True)
+        del blob, sd
+        gc.collect(); torch.cuda.empty_cache()
     if args.resume and os.path.exists(latest):
         # Load on CPU. map_location="cuda" materializes the 14 GB blob next to
         # the live model+Adam state and fragments the 24 GB card so the first
@@ -686,6 +702,10 @@ def main():
                     help="also write latest.pt at least this often (power outage)")
     ap.add_argument("--eval-n", type=int, default=16)
     ap.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--init-from", default="",
+                    help="load MODEL weights from this checkpoint and start a fresh "
+                         "schedule (step 0, new optimizer). For a context-extension "
+                         "stage: point --seqlen at the new length and --out at a new dir.")
     ap.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--probe", action="store_true")
     a = ap.parse_args()
