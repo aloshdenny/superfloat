@@ -125,21 +125,44 @@ going to close it; it closes a different half of the same audit.
   frequencies, one architecture, one size, one seed. Whether hard-clamping
   `down_proj`/`gate_proj` output itself (rather than just its norm-fed
   input) closes `max_layer_output` is untested, not just unsolved.
-- **No 1B val at a real token budget yet.** The first Modal attempt trained
-  both arms on a single 100M-token shard for 24h (a `vol.reload()` omission;
-  the training containers never saw the other 199 shards) -- ~30 epochs over
-  96M tokens, val ppl bottoming at 48.5 near 3.5 epochs and then tripling.
-  It is a memorisation run, not pretraining, and its final losses are not
-  quotable. It does establish one thing cleanly, because both arms saw the
-  identical data in the identical order: **SF8 `ln_all` and bf16 are
-  indistinguishable at the 1B shape** -- train ppl agrees to two decimals at
-  every logged step over 80k steps, val ppl within 1% through the clean
-  single-pass first epoch (154.3 vs 154.5 at 66M tokens) and within 4% even
-  deep into overfitting; at the val minimum SF8 is marginally ahead (48.51 vs
-  48.68). `sf1b_run0_*.jsonl`, `lab_sf1b_run0_ppl.png`. The corrected run
-  (full corpus on disk before start, self-chaining across the 24h ceiling)
-  is what will supply the archived number.
-- **No matched bf16 1B control at a real budget yet.** Same rerun.
+- **The 1B run is cut short, not finished.** The corrected run (full corpus
+  verified on disk before start, 8K context) reached 6.4B of a planned 20B
+  tokens before the compute workspace hit its spend limit. What it does
+  establish, on identical data in identical order over 971 matched
+  evaluation points, is that **SF8 `ln_all` and bf16 are indistinguishable at
+  the Llama-3.2-1B shape**: final matched val loss 2.8100 (bf16) vs 2.8098
+  (SF8), ppl 16.61 both, with the gap over the last 40 matched evals at
+  -0.013%. An earlier attempt trained both arms on a single 100M-token shard
+  for 24h (a `vol.reload()` omission) and is memorisation, not pretraining;
+  it is kept only as `sf1b_run0_*.jsonl` because both arms saw identical
+  tokens there too. `sf1b_8k_*.jsonl`, `lab_sf1b_8k_matched.png`.
+- **Context extension holds, and the SF8 penalty does not compound.**
+  Continuing those 8K checkpoints at longer context, each stage with its own
+  short cosine schedule at lr 5e-5:
+
+  | rung | tokens | bf16 val ppl | SF8 val ppl | gap |
+  | --- | --- | --- | --- | --- |
+  | 8K (pretrain) | 6.4B | 16.61 | 16.61 | -0.02% |
+  | 32K (extension) | +60M | 15.77 | 15.97 | +1.27% |
+  | 128K (extension) | +50M | **15.45** | **15.61** | +1.05% |
+
+  Both arms end each rung below the previous one, which is the expected
+  benefit of longer context. Two things are worth separating. First, before
+  adaptation SF8 *extrapolates* to unseen RoPE positions better: at the first
+  32K evaluation bf16 sits at 111.9 ppl against SF8's 86.6 (-22.6%), and both
+  then fall to ~16 within 100 steps. Second, after adaptation SF8 settles
+  about 1% behind, and that gap is flat across rungs (+1.27% at 32K, +1.05%
+  at 128K) rather than growing with context length -- the quantisation cost
+  of extension is paid once, not per doubling. `sf1b_ext32k_*.jsonl`,
+  `sf1b_ext128k_*.jsonl`, `lab_sf1b_context_ladder.png`.
+
+  Read narrowly. One seed; the 8K base is 6.4B tokens rather than a
+  completed budget; the two arms entered extension from slightly different
+  8K steps (48800 bf16 vs 48400 SF8); and each extension stage is 50-60M
+  tokens against the six-stage, far longer recipe Llama 3 uses. Long-context
+  *retrieval* behaviour is not measured at all here -- this is perplexity on
+  held-out FineWeb-Edu, which a model can improve without actually using the
+  far context.
 
 ---
 
