@@ -258,3 +258,21 @@ def extend_arm(bits: int, init_ckpt: str, tokens: int, seqlen: int = 32768,
         raise RuntimeError(f"{tag} leg {chain} exited {proc.returncode}")
     return {"tag": tag, "leg": chain, "status": "done"}
 
+@app.function(image=image, gpu=GPU, volumes={"/vol": vol}, secrets=[hf_secret],
+              timeout=4 * 60 * 60)
+def niah(ckpt: str, bits: int, ctx: int, samples: int = 8, seed: int = 0,
+         mode: str = "ln_all", depths: str = "0.1,0.25,0.5,0.75,0.9"):
+    """Loss-based needle-in-a-haystack. Inference only."""
+    import os, subprocess
+    vol.reload()
+    env = {**_env(), "NIAH_OUT": f"{OUT_ROOT}/niah"}
+    args = ["python", "niah_1b.py", "--ckpt", ckpt, "--data", DATA,
+            "--bits", str(bits), "--mode", mode, "--ctx", str(ctx),
+            "--samples", str(samples), "--seed", str(seed), "--depths", depths]
+    print(f"[niah] {' '.join(args)}", flush=True)
+    proc = subprocess.run(args, cwd="/root/sfx_bench/lab", env=env)
+    vol.commit()
+    if proc.returncode != 0:
+        raise RuntimeError(f"niah exited {proc.returncode}")
+    return {"ckpt": ckpt, "bits": bits, "ctx": ctx}
+
