@@ -156,6 +156,40 @@ going to close it; it closes a different half of the same audit.
   of extension is paid once, not per doubling. `sf1b_ext32k_*.jsonl`,
   `sf1b_ext128k_*.jsonl`, `lab_sf1b_context_ladder.png`.
 
+- **Longer context improved perplexity without buying retrieval.** The ladder
+  above is perplexity, which a model can improve using only local context. A
+  loss-based needle test (`niah_1b.py`) settles what it actually uses: plant a
+  random token sequence at depth *d*, re-present its first 16 tokens at the
+  end, and score NLL on the remaining 48 against a control that plants a
+  *different* needle, so the only variable is whether the answer is
+  retrievable. Perfect copying would score ~11.76 nats (log 128256); 0 means
+  no retrieval. **Our own bf16 control is the baseline at 100%** -- Meta's
+  published Llama numbers are never the reference, since corpus, budget and
+  recipe all differ.
+
+  | evaluation context | bf16 (baseline) | SF8 | SF8 relative |
+  | --- | --- | --- | --- |
+  | 8K | 2.908 | 3.091 | 106.3% |
+  | 32K | 0.212 | 0.192 | 90.6% |
+  | 128K | 0.005 | 0.004 | n/a (both at noise) |
+  | 32K, 8K-only model (control) | 0.004 | 0.005 | n/a (both at noise) |
+
+  Higher is better here, the opposite of the perplexity tables. Two readings.
+  First, SF8 tracks bf16 at every context: quantisation does not cost
+  retrieval, and at 8K it is marginally ahead. Second, and more important,
+  **neither arm retrieves beyond ~8K**. At 128K both sit at 0.004-0.005 nats,
+  indistinguishable from an 8K-only model evaluated at 32K, which never saw
+  those positions at all.
+
+  The per-depth data shows this is a *distance* effect rather than a context
+  one: at 8K a needle 819 tokens back scores 7.08 nats, 2048 back scores 4.42,
+  4096 back scores 1.20, and 7372 back scores 0.19. The effective retrieval
+  range is roughly two thousand tokens and decays sharply past four, so at
+  128K even the nearest tested needle (13k back) is out of range. The
+  perplexity gains at 32K and 128K are therefore local-context gains, and the
+  extension stages did not extend what the model can actually reach.
+  `benchmarks/results/niah/`, `lab_sf1b_niah.png`.
+
   Read narrowly. One seed; the 8K base is 6.4B tokens rather than a
   completed budget; the two arms entered extension from slightly different
   8K steps (48800 bf16 vs 48400 SF8); and each extension stage is 50-60M

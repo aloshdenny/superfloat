@@ -1,0 +1,50 @@
+{
+  "exp": "niah_1b",
+  "ckpt": "/home/tinkerspace/sf1b_ckpt/ext128k_bf16_model.pt",
+  "bits": 0,
+  "mode": "ln_all",
+  "ctx": 8192,
+  "needle": 64,
+  "prefix": 16,
+  "samples": 4,
+  "seed": 0,
+  "vocab_nats": 11.761783545564427,
+  "rows": [
+    {
+      "depth": 0.1,
+      "nll_planted": 12.958969354629517,
+      "nll_control": 13.146249294281006,
+      "retrieval": 0.18727993965148926,
+      "n": 4
+    },
+    {
+      "depth": 0.25,
+      "nll_planted": 11.643635392189026,
+      "nll_control": 13.301704168319702,
+      "retrieval": 1.6580687761306763,
+      "n": 4
+    },
+    {
+      "depth": 0.5,
+      "nll_planted": 12.06235408782959,
+      "nll_control": 13.263362169265747,
+      "retrieval": 1.2010080814361572,
+      "n": 4
+    },
+    {
+      "depth": 0.75,
+      "nll_planted": 8.992362976074219,
+      "nll_control": 13.408252954483032,
+      "retrieval": 4.4158899784088135,
+      "n": 4
+    },
+    {
+      "depth": 0.9,
+      "nll_planted": 6.047896385192871,
+      "nll_control": 13.125186681747437,
+      "retrieval": 7.077290296554565,
+      "n": 4
+    }
+  ],
+  "mean_retrieval": 2.90790741443634
+}

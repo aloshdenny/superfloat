@@ -80,8 +80,10 @@ def run(a):
             needle = rng.integers(0, CFG["vocab"], size=a.needle).astype(np.int64)
             other = rng.integers(0, CFG["vocab"], size=a.needle).astype(np.int64)
             cue, tail = needle[:a.prefix], needle[a.prefix:]
-            # room for the needle plus the re-presented cue at the end
-            body = hay[: a.ctx - a.needle - a.prefix]
+            # the scored sequence is body + needle + cue + tail, and that must
+            # come to exactly a.ctx so it fits the RoPE buffers built for it:
+            # len(body) + needle + prefix + (needle - prefix) = len(body) + 2*needle
+            body = hay[: a.ctx - 2 * a.needle]
             pos = int(depth * (len(body) - 1))
             def build(planted_needle):
                 return np.concatenate([body[:pos], planted_needle, body[pos:], cue])
@@ -98,7 +100,11 @@ def run(a):
                vocab_nats=float(np.log(CFG["vocab"])), rows=rows,
                mean_retrieval=float(np.mean([r["retrieval"] for r in rows])))
     os.makedirs(OUT, exist_ok=True)
-    tag = f"niah_{'bf16' if not a.bits else f'sf{a.bits}'}_ctx{a.ctx}_s{a.seed}"
+    # the checkpoint identity MUST be in the tag: two models of the same arm
+    # evaluated at the same ctx (e.g. the 8K base vs the 128K-extended one)
+    # otherwise silently overwrite each other's results.
+    src = os.path.splitext(os.path.basename(a.ckpt))[0]
+    tag = f"niah_{src}_{'bf16' if not a.bits else f'sf{a.bits}'}_ctx{a.ctx}_s{a.seed}"
     json.dump(rec, open(f"{OUT}/{tag}.json", "w"), indent=2)
     print(f"[{tag}] mean retrieval {rec['mean_retrieval']:+.3f} nats "
           f"(random baseline would be 0; perfect copy ~{rec['vocab_nats']:.2f})", flush=True)
