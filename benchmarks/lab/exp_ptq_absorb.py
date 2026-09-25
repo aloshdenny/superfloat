@@ -26,7 +26,7 @@ EVAL = os.environ.get("EXP2_EVAL", "/workspace/eval_tokens.npy")
 SEQLEN = 2048
 SIZES = ["70m", "160m", "410m"]
 STEPS = [143000]
-PRECS = [0, 4, 6, 8]
+PRECS = [0, 2, 3, 4, 6, 8]
 TOK_PER_STEP = 2_097_152
 HEAD = ("embed_out", "lm_head")
 

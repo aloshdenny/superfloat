@@ -406,6 +406,69 @@ def fig_tierd(rows, out):
     fig.savefig(p, dpi=180); plt.close(fig); return p
 
 
+def fig_ptq_absorb(rows, out):
+    """PTQ with and without scale absorption, over the Pythia checkpoint ladder.
+
+    Left two panels: penalty against the cell's own FP16 control, dashed for
+    plain per-tensor PTQ and solid for absorption, log scale because the two
+    arms differ by more than an order of magnitude at coarse grids. Right
+    panel: dead-weight fraction without absorption -- with absorption it is
+    0.0 in every one of the 45 quantized cells, so there is no curve to draw.
+    """
+    if not rows:
+        return None
+    R = {(r["size"], r["step"], r["bits"], r["absorb"]): r for r in rows}
+    sizes = [s for s in ("160m", "410m") if any(r["size"] == s for r in rows)]
+    if not sizes:
+        return None
+    steps = sorted({r["step"] for r in rows})
+    bits = [8, 6, 4]
+    FLOOR = 1e-3  # absorbed SF8 lands at or below FP16; clamp so log axis renders
+    fig, ax = plt.subplots(1, len(sizes) + 1, figsize=(5.0 * (len(sizes) + 1), 4.0))
+
+    for k, size in enumerate(sizes):
+        a = ax[k]
+        for j, b in enumerate(bits):
+            for absorb, style, lab in ((False, "--", "plain"), (True, "-", "absorbed")):
+                xs, ys = [], []
+                for st in steps:
+                    base = R.get((size, st, 0, False)); cell = R.get((size, st, b, absorb))
+                    if not (base and cell):
+                        continue
+                    xs.append(base["tokens"] / 1e9)
+                    ys.append(max(cell["val_loss"] - base["val_loss"], FLOOR))
+                if xs:
+                    a.plot(xs, ys, style, color=C[j], marker="o" if absorb else "x",
+                           ms=4, label=f"SF{b} {lab}")
+        a.set_xscale("log"); a.set_yscale("log")
+        a.set_xlabel("training tokens (B)"); a.set_ylabel("penalty vs FP16 (nats)")
+        a.set_ylim(FLOOR * 0.7, None)
+        a.set_title(f"Pythia-{size}"); a.grid(alpha=.3, which="both")
+        a.axhline(0.1, color="k", lw=.8, alpha=.5)
+        if k == 0:
+            a.legend(fontsize=7, ncol=2)
+
+    a = ax[-1]
+    for k, size in enumerate(sizes):
+        for j, b in enumerate(bits):
+            xs, ys = [], []
+            for st in steps:
+                base = R.get((size, st, 0, False)); cell = R.get((size, st, b, False))
+                if not (base and cell):
+                    continue
+                xs.append(base["tokens"] / 1e9); ys.append(100 * cell["dead_frac"])
+            if xs:
+                a.plot(xs, ys, "-", color=C[j], marker=["o", "s"][k], ms=4,
+                       alpha=[1.0, 0.55][k], label=f"SF{b} {size}")
+    a.set_xscale("log"); a.set_xlabel("training tokens (B)")
+    a.set_ylabel("dead weights (%), plain PTQ")
+    a.set_title("absorbed arm is 0.0% in all 45 cells")
+    a.grid(alpha=.3); a.legend(fontsize=7, ncol=2)
+
+    fig.tight_layout(); p = os.path.join(out, "lab_ptq_absorb.png")
+    fig.savefig(p, dpi=180); plt.close(fig); return p
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-dir", default="."); ap.add_argument("--out", default="figures")
@@ -422,6 +485,10 @@ def main():
     rows8 = load(a.results_dir, "exp8")
     print(f"  exp8: {len(rows8)} rows")
     p = fig_tierd(rows8, a.out)
+    if p: made.append(p)
+    rows_abs = load(a.results_dir, "ptq_absorb")
+    print(f"  ptq_absorb: {len(rows_abs)} rows")
+    p = fig_ptq_absorb(rows_abs, a.out)
     if p: made.append(p)
     rows7 = load(a.results_dir, "exp7")
     print(f"  exp7: {len(rows7)} rows")

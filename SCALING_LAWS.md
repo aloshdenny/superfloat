@@ -425,6 +425,107 @@ and it is consistent with SF2 being exactly ternary, the BitNet operating
 point. But this is one architecture at one size, so it is a measured effect
 with a hypothesis attached, not a mechanism.
 
+### 4.2 Scale absorption applied to PTQ: the missing arm of 3.3
+
+Tier B and 3.3 quantize weights in place with no per-channel scale. The tier
+C/D fix was never carried to PTQ, which left the study's most-quoted numbers --
+the U-shape in training tokens, and SF4 PTQ destroying every model -- measured
+only in the condition the fix was designed to repair. `exp_ptq_absorb.py`
+closes that, on the same Pythia checkpoints and the same WikiText-103 eval
+slice exp2 uses, with a per-input-channel scale folded into the activation so
+the weight reaching the array is an exact SF grid point and no runtime scale
+multiply survives.
+
+105 cells: {70m, 160m, 410m} x 7 checkpoints x {SF8, SF6, SF4} x {plain,
+absorbed}, each scored against its own FP16 control at the same checkpoint.
+14 cells were measured twice on different hardware; the replicates agree to
+5e-8 nats, which checks the harness rather than the noise, since PTQ here is
+deterministic and has no seed axis.
+
+**Dead weights go to zero, everywhere.** In all 45 absorbed cells the
+dead-weight fraction is exactly 0.0. Without absorption it never is:
+
+| | SF8 | SF6 | SF4 |
+| --- | --- | --- | --- |
+| 160m, range over 7 checkpoints | 8.6-25.2% | 33.0-69.5% | 88.7-99.6% |
+| 410m, range over 7 checkpoints | 10.9-40.7% | 41.4-74.7% | 96.0-99.9% |
+
+This is the exp5 mechanism (dead fraction scales with `fan_in` against a fixed
+grid spacing) appearing at PTQ: rescaling each input channel to the grid's full
+range removes the `fan_in` dependence, so nothing underflows.
+
+**Penalty vs the cell's own FP16 control**, in nats:
+
+| Pythia-160m | SF8 plain | SF8 abs | SF6 plain | SF6 abs | SF4 plain | SF4 abs |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2.1B | +0.104 | **+0.001** | +3.989 | **+0.007** | +7.922 | **+0.046** |
+| 6.3B | +0.033 | +0.001 | +0.918 | +0.018 | +11.202 | +0.259 |
+| 16.8B | +0.027 | +0.001 | +0.673 | +0.008 | +7.040 | +0.440 |
+| 41.9B | +0.036 | +0.006 | +0.739 | +0.031 | +10.164 | +1.128 |
+| 81.8B | +0.029 | *+0.042* | +0.896 | +0.132 | +9.594 | +1.592 |
+| 163.6B | +0.231 | *+0.282* | +2.252 | +0.726 | +12.119 | +3.571 |
+| 299.9B | +0.655 | +0.654 | +5.789 | +1.950 | +20.272 | +6.717 |
+
+| Pythia-410m | SF8 plain | SF8 abs | SF6 plain | SF6 abs | SF4 plain | SF4 abs |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2.1B | +0.399 | **+0.003** | +4.045 | **+0.004** | +5.947 | **+0.026** |
+| 6.3B | +0.073 | -0.000 | +4.955 | +0.074 | +18.101 | +0.122 |
+| 16.8B | +0.029 | +0.000 | +1.601 | +0.025 | +11.328 | +0.448 |
+| 41.9B | +0.030 | -0.000 | +1.375 | +0.017 | +7.262 | +1.160 |
+| 81.8B | +0.030 | +0.005 | +1.432 | +0.029 | +9.953 | +2.334 |
+| 163.6B | +0.053 | +0.014 | +2.588 | +0.087 | +8.920 | +3.901 |
+| 299.9B | +0.562 | +0.222 | +6.379 | +1.030 | +10.011 | +8.060 |
+
+**The left branch of the U is a scale-placement artefact.** 3.3 reads the rise
+at 2.1B tokens as young weights not yet having settled into the scale the
+trained network uses. Absorption tests that directly, and it is right: the
+early penalty does not survive putting the scale in the right place. At 410m
+and 2.1B tokens, SF8 falls from +0.399 to +0.003 and SF6 from +4.045 to +0.004
+-- the most fragile checkpoint in the ladder becomes the *least* damaged one.
+Through the whole first half of training, absorbed SF8 is FP16 to three
+decimals.
+
+**The right branch is not.** At the final checkpoint absorption helps much less
+and at 160m not at all: SF8 goes +0.655 to +0.654. The two halves of the U
+therefore have different mechanisms. The left half is scale placement and is
+fixable at zero inference cost; the right half -- over-training and
+learning-rate decay, which 3.3 could not separate -- is something absorption
+does not touch. 3.3's practical advice survives the fix intact: the worst
+checkpoint to quantize is still the one that ships.
+
+**Absorption is worth about two bits through the middle.** Absorbed SF6 matches
+or beats plain SF8 at every 410m checkpoint through 81.8B tokens (the largest
+margin -0.395 nats, the largest loss +0.001) and at every 160m checkpoint
+through 41.9B. Past that the right branch reasserts itself and the two-bit
+equivalence breaks: at 299.9B absorbed SF6 is 1.3 nats worse than plain SF8 at
+160m.
+
+**SF4 PTQ moves from impossible to conditional.** Every previous SF4 PTQ cell
+in this study destroys the model -- +6 to +20 nats, with 88-99.9% of weights
+dead. Absorbed SF4 holds under 0.5 nats through 16.8B tokens at both sizes and
+under 1.2 through 41.9B at 410m. This is not a recommendation to ship SF4 PTQ:
+at the final checkpoint it is still +6.7 and +8.1 nats. It is that the barrier
+was the scale, not the four bits.
+
+**Where absorption loses.** It is not free. It trades clipping and underflow
+error for a rounding error on the rescaled weight, so when the dead fraction is
+already near its minimum and the grid is fine enough that rounding dominates,
+the trade is a wash or slightly negative -- italicised above at 160m/SF8,
+81.8B and 163.6B, which is precisely the bottom of that model's U. The one
+sharp loss is 70m, measured only at its final checkpoint and the most
+over-trained point in the set at 4284 tokens/parameter: SF8 goes +0.575 plain
+to +1.478 absorbed. Absorption still halves its SF6 (+5.137 to +2.638) and SF4
+(+15.797 to +7.363) penalties. On the two sizes with a full ladder it never
+loses at SF6 or SF4, at any checkpoint.
+
+![PTQ under scale absorption](benchmarks/figures/lab_ptq_absorb.png)
+
+Read this narrowly. Three sizes, no 1.4b (it does not fit the card this ran
+on), so the size axis is too short to fit anything. SF2 and SF3 are not in this
+grid, which matters because 4.1's inversion lives there. One eval corpus, 400k
+WikiText-103 tokens at sequence length 2048; PTQ being deterministic removes
+the seed question but says nothing about corpus sensitivity.
+
 ---
 
 ## 5. Follow-up experiments
@@ -444,11 +545,12 @@ buried:
 | 5.5 | depth sweep | per-channel normalisation |
 | 5.6 | ResNet-56 seed spread | **plain SF, no normalisation** |
 | 4.1 | inversion re-run | scale absorption into the norm |
+| 4.2 | PTQ absorption grid | **measures both, side by side** |
 
 Where normalisation is used, the scale is absorbed by the layer that follows or
 feeds the matmul, so the weights reaching the array are exact SF grid values at
 inference. Everything is CIFAR-100 except 5.4 and 4.1, which are language
-models on FineWeb-Edu.
+models on FineWeb-Edu, and 4.2, which is PTQ on Pythia checkpoints.
 
 ### 5.1 Activations, not weights, are the binding constraint
 
@@ -756,8 +858,16 @@ as a property of the format.
   as more than a single favourable seed at D/N = 10. The open item is now
   narrower and sharper: not "does it reproduce at 11M" (yes, in one row) but
   "what non-D/N variable turns it on and off between D/N = 5 and 10."
-- **PTQ under scale absorption** was never run. Given SF4 PTQ destroys every
-  model tested, it is the obvious next experiment.
+- **PTQ under scale absorption** is now run (4.2) and answers the original
+  form of this bullet: SF4 PTQ was destroying every model because of where the
+  scale sat, not because of the four bits. What it opens in its place is
+  narrower. The grid covers SF8/SF6/SF4 only, so it does not reach the SF2-SF3
+  range where 4.1's inversion lives; it stops at 410m, which is too short a
+  size axis to fit anything; and it leaves the right branch of the U
+  unexplained, since absorption removes the left branch entirely and barely
+  moves the right. Separating over-training from learning-rate decay on that
+  branch still needs the truncated-schedule Pythia runs 3.3's caveat calls
+  for.
 - **Activation quantization** is out of scope for the four tiers; 5.1 measures
   it directly on CIFAR-100, and the V-JEPA measurement in
   [SUPERFLOAT_RESULTS.md](SUPERFLOAT_RESULTS.md) shows why it matters.
@@ -840,6 +950,8 @@ benchmarks/
   lab/exp5_alloc.py            per-layer dead-weight profile
   lab/exp6_lr.py               (precision, learning rate) stability grid
   lab/exp8_tierd_seeds.py      11m re-run of 4.1, three seeds with controls
+  lab/exp_ptq_absorb.py        4.2, PTQ with and without scale absorption over
+                               the same Pythia grid exp2 uses
   lab/README.md                what each experiment asks, and how to run it
   analyze_scaling.py           logistic fit of p0, width law
   make_scaling_figures.py      the four-tier figures

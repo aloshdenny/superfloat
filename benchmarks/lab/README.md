@@ -20,6 +20,7 @@ silent bug visible, and several were caught that way.
 | 6 | `exp6_lr.py` | does usable step size track grid resolution? | no, not over a 640x range |
 | 7 | `exp1_act.py --no-chan-norm --depth` | does the paper's ResNet-56 instability reproduce? | no: 0.94 pp against 12.0 |
 | 8 | `exp8_tierd_seeds.py` | does 4.1's inversion reproduce, with records kept? | yes: every cell within 0.016 nats |
+| 9 | `exp_ptq_absorb.py` | does the tier C/D scale fix work at PTQ? | yes on the U's left branch, not on its right |
 
 Two further scripts target tool-use models rather than the scaling study; see
 [TOOL_USE_QAT.md](../../TOOL_USE_QAT.md).
