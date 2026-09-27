@@ -436,19 +436,27 @@ slice exp2 uses, with a per-input-channel scale folded into the activation so
 the weight reaching the array is an exact SF grid point and no runtime scale
 multiply survives.
 
-105 cells: {70m, 160m, 410m} x 7 checkpoints x {SF8, SF6, SF4} x {plain,
-absorbed}, each scored against its own FP16 control at the same checkpoint.
-14 cells were measured twice on different hardware; the replicates agree to
-5e-8 nats, which checks the harness rather than the noise, since PTQ here is
-deterministic and has no seed axis.
+180 cells, run in two passes on two machines. The first covers {70m, 160m,
+410m} x 7 checkpoints x {SF8, SF6, SF4} x {plain, absorbed} on a 4GB card; the
+second adds SF3 and SF2 over the same ladder on an RTX 4090. Every cell is
+scored against an FP16 control measured on its own host at its own checkpoint,
+and the `host` field in the results file records which.
 
-**Dead weights go to zero, everywhere.** In all 45 absorbed cells the
+Two independent checks come free. Within the first pass, 14 cells were measured
+twice and agree to 5e-8 nats. Across the two passes, all 15 FP16 controls were
+re-measured: at 160m and 410m they reproduce to 1e-5 nats or better at every
+checkpoint, with 70m the one outlier at 3e-4. PTQ here is deterministic and has
+no seed axis, so this checks the harness and the cross-host numerics rather
+than the noise -- but it is also why the controls are not shared between
+passes.
+
+**Dead weights go to zero, everywhere.** In all 75 absorbed cells the
 dead-weight fraction is exactly 0.0. Without absorption it never is:
 
-| | SF8 | SF6 | SF4 |
-| --- | --- | --- | --- |
-| 160m, range over 7 checkpoints | 8.6-25.2% | 33.0-69.5% | 88.7-99.6% |
-| 410m, range over 7 checkpoints | 10.9-40.7% | 41.4-74.7% | 96.0-99.9% |
+| | SF8 | SF6 | SF4 | SF3 | SF2 |
+| --- | --- | --- | --- | --- | --- |
+| 160m, range over 7 checkpoints | 8.6-25.2% | 33.0-69.5% | 88.7-99.6% | 98.7-100% | 99.6-100% |
+| 410m, range over 7 checkpoints | 10.9-40.7% | 41.4-74.7% | 96.0-99.9% | 99.6-100% | 99.9-100% |
 
 This is the exp5 mechanism (dead fraction scales with `fan_in` against a fixed
 grid spacing) appearing at PTQ: rescaling each input channel to the grid's full
@@ -518,11 +526,56 @@ to +1.478 absorbed. Absorption still halves its SF6 (+5.137 to +2.638) and SF4
 (+15.797 to +7.363) penalties. On the two sizes with a full ladder it never
 loses at SF6 or SF4, at any checkpoint.
 
+**At SF3 and SF2 the grid runs out, and where it runs out depends on
+training.** Plain SF3 and SF2 destroy every checkpoint tested -- +6 to +26 nats
+with 98-100% of weights dead -- so the only interesting arm is the absorbed
+one. There, the full ladder reads:
+
+| absorbed penalty | SF8 | SF6 | SF4 | SF3 | SF2 |
+| --- | --- | --- | --- | --- | --- |
+| 160m @ 2.1B | +0.001 | +0.007 | +0.046 | **+0.229** | +1.523 |
+| 160m @ 299.9B | +0.654 | +1.950 | +6.717 | +7.817 | +10.823 |
+| 410m @ 2.1B | +0.003 | +0.004 | +0.026 | **+0.150** | +1.233 |
+| 410m @ 299.9B | +0.222 | +1.030 | +8.060 | +8.992 | +8.953 |
+
+Absorbed SF3 on an early checkpoint costs 0.15-0.23 nats, which is less than
+absorbed *SF8* costs on the final one. Training position dominates precision
+once the grid is coarse: the same three bits are worth a fifth of a nat at 2.1B
+tokens and nine nats at 300B. SF2 never gets under a nat anywhere, which is the
+honest end of the ladder for PTQ.
+
+**4.1's inversion does not survive PTQ, which is evidence about its
+mechanism.** 4.1 finds coarser grids landing *closer* to FP32 under scale
+absorption -- SF2 < SF3 < SF4 in penalty, replicated over three seeds in
+experiment 8 -- and section 6 has carried "what remains unexplained is the
+mechanism" as an open item ever since. This grid is the same scale placement
+and the same precisions with training removed, and the ordering is the ordinary
+one: penalty rises monotonically from SF8 to SF2 at 13 of the 14 checkpoints.
+The single exception is 410m at 299.9B, where SF3 and SF2 sit 0.04 nats apart
+at +8.99 and +8.95 -- both models are destroyed, and differences between
+destroyed models are not meaningful.
+
+That is what the regularisation hypothesis predicts. If a coarse grid helps by
+constraining an over-parameterised model *during training*, then quantizing
+after training removes the mechanism and the advantage with it, which is what
+happens. It does not prove the hypothesis -- PTQ and QAT differ in more than
+this one respect -- but it rules out the main alternative, that the inversion is
+some static property of where the SF grid points fall relative to a trained
+weight distribution. If that were the cause it would show up here, and it does
+not.
+
+**A note on reading the large numbers.** Penalties above about 5 nats mean the
+model is emitting something close to noise, and the ordering among such cells
+carries no information: all four plain non-monotonicities in the full grid, and
+the one absorbed non-monotonicity, sit in that regime. The claims above rest on
+the cells under a nat.
+
 ![PTQ under scale absorption](benchmarks/figures/lab_ptq_absorb.png)
 
-Read this narrowly. Three sizes, no 1.4b (it does not fit the card this ran
-on), so the size axis is too short to fit anything. SF2 and SF3 are not in this
-grid, which matters because 4.1's inversion lives there. One eval corpus, 400k
+Read this narrowly. Three sizes, no 1.4b, so the size axis is still too short
+to fit anything -- and 1.4b is the size 3.3's own U-shape table leans on, so
+that gap is the one worth closing next. The SF3/SF2 pass covers the same seven
+checkpoints as the rest, but 70m only at its final one. One eval corpus, 400k
 WikiText-103 tokens at sequence length 2048; PTQ being deterministic removes
 the seed question but says nothing about corpus sensitivity.
 
@@ -858,15 +911,18 @@ as a property of the format.
   as more than a single favourable seed at D/N = 10. The open item is now
   narrower and sharper: not "does it reproduce at 11M" (yes, in one row) but
   "what non-D/N variable turns it on and off between D/N = 5 and 10."
+  4.2 removes one candidate mechanism: with training taken away and scale
+  placement held fixed, the ordering reverts to monotonic at 13 of 14
+  checkpoints, so the inversion is not a static property of how SF grid points
+  fall against a trained weight distribution. It needs the training."
 - **PTQ under scale absorption** is now run (4.2) and answers the original
   form of this bullet: SF4 PTQ was destroying every model because of where the
   scale sat, not because of the four bits. What it opens in its place is
-  narrower. The grid covers SF8/SF6/SF4 only, so it does not reach the SF2-SF3
-  range where 4.1's inversion lives; it stops at 410m, which is too short a
-  size axis to fit anything; and it leaves the right branch of the U
-  unexplained, since absorption removes the left branch entirely and barely
-  moves the right. Separating over-training from learning-rate decay on that
-  branch still needs the truncated-schedule Pythia runs 3.3's caveat calls
+  narrower. The grid now reaches SF2 and SF3, but it still stops at 410m, which
+  is too short a size axis to fit anything, and it leaves the right branch of
+  the U unexplained, since absorption removes the left branch entirely and
+  barely moves the right. Separating over-training from learning-rate decay on
+  that branch still needs the truncated-schedule Pythia runs 3.3's caveat calls
   for.
 - **Activation quantization** is out of scope for the four tiers; 5.1 measures
   it directly on CIFAR-100, and the V-JEPA measurement in
