@@ -308,7 +308,10 @@ half bits of deployable precision.
 ![D/N law](benchmarks/figures/lab_exp2_dn_law.png)
 
 **Practical consequence.** The worst checkpoint to quantize is the one that
-ships. The same model taken from the middle of its schedule tolerates PTQ 3x
+ships -- under plain PTQ. 4.2 revisits this branch with the scale absorbed and
+finds it shrinks sharply with model size: at 1.4b the shipped checkpoint costs
+absorbed SF8 0.009 nats, against 0.115 for the same checkpoint and precision
+without absorption. The same model taken from the middle of its schedule tolerates PTQ 3x
 to 25x better, with the gap widening the further past compute-optimal the model
 is trained.
 
@@ -436,9 +439,10 @@ slice exp2 uses, with a per-input-channel scale folded into the activation so
 the weight reaching the array is an exact SF grid point and no runtime scale
 multiply survives.
 
-180 cells, run in two passes on two machines. The first covers {70m, 160m,
+257 cells, run in three passes on two machines. The first covers {70m, 160m,
 410m} x 7 checkpoints x {SF8, SF6, SF4} x {plain, absorbed} on a 4GB card; the
-second adds SF3 and SF2 over the same ladder on an RTX 4090. Every cell is
+second adds SF3 and SF2 over the same ladder on an RTX 4090; the third adds
+pythia-1.4b at all five precisions, which needed the larger card. Every cell is
 scored against an FP16 control measured on its own host at its own checkpoint,
 and the `host` field in the results file records which.
 
@@ -450,17 +454,21 @@ no seed axis, so this checks the harness and the cross-host numerics rather
 than the noise -- but it is also why the controls are not shared between
 passes.
 
-**Dead weights go to zero, everywhere.** In all 75 absorbed cells the
+**Dead weights go to zero, everywhere.** In all 110 absorbed cells the
 dead-weight fraction is exactly 0.0. Without absorption it never is:
 
 | | SF8 | SF6 | SF4 | SF3 | SF2 |
 | --- | --- | --- | --- | --- | --- |
 | 160m, range over 7 checkpoints | 8.6-25.2% | 33.0-69.5% | 88.7-99.6% | 98.7-100% | 99.6-100% |
 | 410m, range over 7 checkpoints | 10.9-40.7% | 41.4-74.7% | 96.0-99.9% | 99.6-100% | 99.9-100% |
+| 1.4b, range over 7 checkpoints | 13.0-50.3% | 48.4-84.4% | 98.5-100% | 100% | 100% |
 
 This is the exp5 mechanism (dead fraction scales with `fan_in` against a fixed
 grid spacing) appearing at PTQ: rescaling each input channel to the grid's full
-range removes the `fan_in` dependence, so nothing underflows.
+range removes the `fan_in` dependence, so nothing underflows. The size axis
+tests that mechanism directly, and it holds -- at each model's worst checkpoint
+the SF8 dead fraction rises with width, 25.2% at 160m, 40.7% at 410m, 50.3% at
+1.4b.
 
 **Penalty vs the cell's own FP16 control**, in nats:
 
@@ -544,16 +552,43 @@ once the grid is coarse: the same three bits are worth a fifth of a nat at 2.1B
 tokens and nine nats at 300B. SF2 never gets under a nat anywhere, which is the
 honest end of the ladder for PTQ.
 
+**At 1.4b the right branch of the U nearly disappears -- but only under
+absorption.** The size axis was the other thing this grid could not reach, and
+it changes the headline. Penalty at the final, shipped checkpoint:
+
+| absorbed, 299.9B tokens | SF8 | SF6 | SF4 |
+| --- | --- | --- | --- |
+| 160m | +0.654 | +1.950 | +6.717 |
+| 410m | +0.222 | +1.030 | +8.060 |
+| 1.4b | **+0.009** | **+0.118** | +6.590 |
+
+At SF8 and SF6 the over-training penalty falls by roughly an order of magnitude
+per size step. Across the *entire* 1.4b ladder -- seven checkpoints from 2.1B to
+300B tokens -- absorbed SF8 never costs more than **0.009 nats**, and absorbed
+SF6 never more than 0.118. The fragility 3.3 found at the end of a training run,
+and that absorption could not remove at 160m, is largely a small-model effect
+once the scale is in the right place.
+
+Two guards on that. It is specific to the finer grids: SF4 shows no size trend
+at all (+6.717, +8.060, +6.590), so this is not "bigger models quantize better"
+in general. And it is three sizes, which orders them but does not fit an
+exponent.
+
+The left branch confirms the same mechanism from the other end. Plain SF8 at
+1.4b's first checkpoint is +1.075 nats, the worst plain SF8 cell anywhere in
+the grid, with 50.3% of weights dead -- the widest model at its most fragile
+moment. Absorption takes that cell to +0.002.
+
 **4.1's inversion does not survive PTQ, which is evidence about its
 mechanism.** 4.1 finds coarser grids landing *closer* to FP32 under scale
 absorption -- SF2 < SF3 < SF4 in penalty, replicated over three seeds in
 experiment 8 -- and section 6 has carried "what remains unexplained is the
 mechanism" as an open item ever since. This grid is the same scale placement
 and the same precisions with training removed, and the ordering is the ordinary
-one: penalty rises monotonically from SF8 to SF2 at 13 of the 14 checkpoints.
-The single exception is 410m at 299.9B, where SF3 and SF2 sit 0.04 nats apart
-at +8.99 and +8.95 -- both models are destroyed, and differences between
-destroyed models are not meaningful.
+one: penalty rises monotonically from SF8 to SF2 at 18 of the 21 checkpoints across all three sizes. All three exceptions are
+non-results: 410m and 1.4b at 299.9B, where SF3 and SF2 sit a few hundredths
+apart with both models destroyed, and 1.4b at 2.1B, where absorbed SF8 and SF6
+differ by 7e-5 nats, which is a tie rather than an inversion.
 
 That is what the regularisation hypothesis predicts. If a coarse grid helps by
 constraining an over-parameterised model *during training*, then quantizing
@@ -572,12 +607,12 @@ the cells under a nat.
 
 ![PTQ under scale absorption](benchmarks/figures/lab_ptq_absorb.png)
 
-Read this narrowly. Three sizes, no 1.4b, so the size axis is still too short
-to fit anything -- and 1.4b is the size 3.3's own U-shape table leans on, so
-that gap is the one worth closing next. The SF3/SF2 pass covers the same seven
-checkpoints as the rest, but 70m only at its final one. One eval corpus, 400k
-WikiText-103 tokens at sequence length 2048; PTQ being deterministic removes
-the seed question but says nothing about corpus sensitivity.
+Read this narrowly. Four sizes now, but only three carry a full ladder, which
+orders them without fitting an exponent -- the size trend above is a direction,
+not a law, and 2.8b and 6.9b would be the cells that turn it into one. 70m is
+measured at its final checkpoint only. One eval corpus, 400k WikiText-103
+tokens at sequence length 2048; PTQ being deterministic removes the seed
+question but says nothing about corpus sensitivity.
 
 ---
 
@@ -918,12 +953,13 @@ as a property of the format.
 - **PTQ under scale absorption** is now run (4.2) and answers the original
   form of this bullet: SF4 PTQ was destroying every model because of where the
   scale sat, not because of the four bits. What it opens in its place is
-  narrower. The grid now reaches SF2 and SF3, but it still stops at 410m, which
-  is too short a size axis to fit anything, and it leaves the right branch of
-  the U unexplained, since absorption removes the left branch entirely and
-  barely moves the right. Separating over-training from learning-rate decay on
-  that branch still needs the truncated-schedule Pythia runs 3.3's caveat calls
-  for.
+  narrower. The grid now reaches SF2/SF3 and 1.4b, and the size axis turned out
+  to matter: the right branch of the U, which absorption barely moves at 160m,
+  costs absorbed SF8 only 0.009 nats at 1.4b. What is still open is why. Three
+  sizes order the effect without fitting an exponent, and separating
+  over-training from learning-rate decay on that branch still needs the
+  truncated-schedule Pythia runs 3.3's caveat calls for. 2.8b and 6.9b are the
+  cheapest cells that would turn the size direction into a law.
 - **Activation quantization** is out of scope for the four tiers; 5.1 measures
   it directly on CIFAR-100, and the V-JEPA measurement in
   [SUPERFLOAT_RESULTS.md](SUPERFLOAT_RESULTS.md) shows why it matters.

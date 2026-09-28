@@ -438,13 +438,13 @@ def fig_ptq_absorb(rows, out):
             return None
         base = get(size, st, 0, False, cell.get("host"))
         return None if not base else cell["val_loss"] - base["val_loss"]
-    sizes = [s for s in ("160m", "410m") if any(r["size"] == s for r in rows)]
+    sizes = [s for s in ("160m", "410m", "1.4b") if any(r["size"] == s for r in rows)]
     if not sizes:
         return None
     steps = sorted({r["step"] for r in rows})
     bits = [8, 6, 4, 3, 2]
     FLOOR = 1e-3  # absorbed SF8 lands at or below FP16; clamp so log axis renders
-    fig, ax = plt.subplots(1, len(sizes) + 1, figsize=(5.0 * (len(sizes) + 1), 4.0))
+    fig, ax = plt.subplots(1, len(sizes) + 1, figsize=(4.6 * (len(sizes) + 1), 4.0))
 
     for k, size in enumerate(sizes):
         a = ax[k]
@@ -468,9 +468,13 @@ def fig_ptq_absorb(rows, out):
         if k == 0:
             a.legend(fontsize=7, ncol=2)
 
+    # Dead weights: only SF8 and SF6 are informative -- SF4 and below sit at
+    # 90-100% everywhere. Showing them by size makes the fan_in story visible:
+    # the wider the model, the larger the fraction that underflows a fixed grid.
     a = ax[-1]
+    marks = ["o", "s", "^", "D"]
     for k, size in enumerate(sizes):
-        for j, b in enumerate(bits):
+        for j, b in enumerate((8, 6)):
             xs, ys = [], []
             for st in steps:
                 base = get(size, st, 0, False); cell = get(size, st, b, False)
@@ -478,11 +482,11 @@ def fig_ptq_absorb(rows, out):
                     continue
                 xs.append(base["tokens"] / 1e9); ys.append(100 * cell["dead_frac"])
             if xs:
-                a.plot(xs, ys, "-", color=C[j], marker=["o", "s"][k], ms=4,
-                       alpha=[1.0, 0.55][k], label=f"SF{b} {size}")
+                a.plot(xs, ys, "-", color=C[j], marker=marks[k % len(marks)],
+                       ms=4, alpha=1.0 - 0.25 * k, label=f"SF{b} {size}")
     a.set_xscale("log"); a.set_xlabel("training tokens (B)")
     a.set_ylabel("dead weights (%), plain PTQ")
-    a.set_title("absorbed arm is 0.0% in every quantized cell")
+    a.set_title("SF4 and below are 90-100% everywhere;\nthe absorbed arm is 0.0% in every cell")
     a.grid(alpha=.3); a.legend(fontsize=7, ncol=2)
 
     fig.tight_layout(); p = os.path.join(out, "lab_ptq_absorb.png")
