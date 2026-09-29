@@ -1,17 +1,3 @@
-# Form fields (do not paste this part)
-
-**Title:** Offering Help On Evaluation Design, Model Compression And Killing Your Own Results
-
-**I am submitting:** To help with problem statements
-
-**I have a submission for:** Volunteering, as facilitator or to help someone with their problem
-
-**Submission type:** Problem exchange facilitator/helper
-
----
-<!-- PASTE EVERYTHING BELOW THIS LINE INTO THE MARKDOWN BODY -->
----
-
 ## How I want to help
 
 - rewrite vague problem statements

@@ -1,19 +1,3 @@
-# Form fields (do not paste this part)
-
-**Title:** It Scored 100 Percent Because It Had Stopped Answering
-
-**I am submitting:** To speak
-
-**I have a submission for:** A talk, 30-40 mins
-
-**Submission type:** Talk/session proposal, 30-40 mins
-
----
-<!-- PASTE EVERYTHING BELOW THIS LINE INTO THE MARKDOWN BODY -->
----
-
-## Describe your session
-
 A model I had compressed scored a perfect 100 on one category of a function calling benchmark. It looked like the best result in the table. It was produced by a model that had stopped emitting function calls almost entirely, on 1.2 percent of prompts, and the category in question scores a model on correctly declining to call a function when none applies. A system that has gone silent passes every one of those cases for free. Had I averaged the three categories the way the benchmark invites you to, I would have published that broken model as a mediocre one, at about 28.7 percent, and nobody reading the number could have told the difference.
 
 This session is about that class of metric, where the safe behaviour and the broken behaviour are indistinguishable from outside the system, and about what it takes to notice. I will show the full result table, including the arm where the failure is obvious once the call rate sits beside the accuracy and invisible when it does not. Then the part I find more useful: a cheap proxy, validation loss, cost about one percent of a benchmark sweep and predicted both the safe configurations and the failure cliff correctly in every case I checked. That changes how you spend an evaluation budget, and it generalises well beyond compression. The same shape appears in any abstention metric, any guardrail that scores a refusal as a success, and any aggregate built from categories with different failure semantics.

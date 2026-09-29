@@ -493,6 +493,59 @@ def fig_ptq_absorb(rows, out):
     fig.savefig(p, dpi=180); plt.close(fig); return p
 
 
+def fig_dogfight(rows, out):
+    """Closed-loop decision policy under SF: accuracy vs calibration.
+
+    Two panels because the point of the experiment is that they disagree.
+    Balanced accuracy holds flat to SF4 and only breaks at SF3, while
+    calibration error is already climbing at SF6 -- for a model whose output
+    is a probability, the second is the one that decides deployability.
+    """
+    if not rows:
+        return None
+    import statistics as st
+    grp = collections.defaultdict(list)
+    for r in rows:
+        key = (r["bits"], bool(r.get("quant_act")))
+        grp[key].append(r)
+
+    def series(act):
+        xs, bal, ece, sd = [], [], [], []
+        for b in (8, 6, 4, 3, 2):
+            v = grp.get((b, act))
+            if not v:
+                continue
+            xs.append(b)
+            bal.append(st.fmean(x["choice_balanced_acc"] for x in v))
+            ece.append(st.fmean(x["noul_ece"] for x in v))
+            sd.append(st.pstdev([x["choice_balanced_acc"] for x in v]) if len(v) > 1 else 0.0)
+        return xs, bal, ece, sd
+
+    ctrl = grp.get((0, False), [])
+    base_b = st.fmean(x["choice_balanced_acc"] for x in ctrl) if ctrl else None
+    base_e = st.fmean(x["noul_ece"] for x in ctrl) if ctrl else None
+
+    fig, ax = plt.subplots(1, 2, figsize=(11, 4.2))
+    for act, lab, style in ((False, "weights only", "-o"), (True, "+ saturated outputs", "--s")):
+        xs, bal, ece, sd = series(act)
+        if not xs:
+            continue
+        ax[0].errorbar(xs, bal, yerr=sd, fmt=style, color=C[0 if not act else 1],
+                       ms=5, capsize=3, label=lab)
+        ax[1].plot(xs, ece, style, color=C[0 if not act else 1], ms=5, label=lab)
+    if base_b is not None:
+        ax[0].axhline(base_b, color="k", lw=.9, ls=":", label="fp32 control")
+        ax[1].axhline(base_e, color="k", lw=.9, ls=":", label="fp32 control")
+    ax[0].set_xlabel("SF bits"); ax[0].set_ylabel("balanced manoeuvre accuracy")
+    ax[0].set_title("accuracy holds to SF4")
+    ax[1].set_xlabel("SF bits"); ax[1].set_ylabel("expected calibration error")
+    ax[1].set_yscale("log"); ax[1].set_title("calibration degrades first")
+    for a in ax:
+        a.invert_xaxis(); a.grid(alpha=.3); a.legend(fontsize=8)
+    fig.tight_layout(); p = os.path.join(out, "lab_dogfight_qat.png")
+    fig.savefig(p, dpi=180); plt.close(fig); return p
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-dir", default="."); ap.add_argument("--out", default="figures")
@@ -509,6 +562,10 @@ def main():
     rows8 = load(a.results_dir, "exp8")
     print(f"  exp8: {len(rows8)} rows")
     p = fig_tierd(rows8, a.out)
+    if p: made.append(p)
+    rows_dog = load(a.results_dir, "dogfight_qat")
+    print(f"  dogfight_qat: {len(rows_dog)} rows")
+    p = fig_dogfight(rows_dog, a.out)
     if p: made.append(p)
     rows_abs = load(a.results_dir, "ptq_absorb")
     print(f"  ptq_absorb: {len(rows_abs)} rows")

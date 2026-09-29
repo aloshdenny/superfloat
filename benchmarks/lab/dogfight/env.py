@@ -31,8 +31,14 @@ FLOOR_FT = 3000.0      # hard deck; below it you have lost the fight
 CEILING_FT = 45000.0
 
 
+# JSBSim finds its aircraft/engine data automatically when pip-installed
+# normally, but not when installed with --target into a lab box's lib dir, so
+# allow the root to be given explicitly.
+JSBSIM_ROOT = os.environ.get("JSBSIM_ROOT") or None
+
+
 def _aircraft(model, alt_ft, kts, psi, lat, lon):
-    f = jsbsim.FGFDMExec(None)
+    f = jsbsim.FGFDMExec(JSBSIM_ROOT)
     f.set_debug_level(0)
     f.load_model(model)
     f.set_dt(DT)

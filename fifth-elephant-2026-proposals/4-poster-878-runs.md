@@ -1,19 +1,3 @@
-# Form fields (do not paste this part)
-
-**Title:** How Few Bits Does A Model Need? 878 Training Runs, One Answer, Several Surprises
-
-**I am submitting:** To speak
-
-**I have a submission for:** Poster, work I can share in the alleyways with attendees
-
-**Submission type:** Poster, alleyway
-
----
-<!-- PASTE EVERYTHING BELOW THIS LINE INTO THE MARKDOWN BODY -->
----
-
-## Describe your session
-
 This poster presents a year of sweeps asking one question: how few bits does a neural network actually need, and what determines the answer? It covers 878 archived training runs across four scaling tiers and eight follow up experiments, on convolutional networks and transformers, under both training aware and post training compression.
 
 The central result is that almost every precision floor in the literature, including the ones I reported myself, is an artefact of where the scale sits rather than a property of the number format. Standard initialisation sets weight variance from fan in, so as layers widen the weights shrink under a fixed grid until an entire layer rounds to zero. Measured at initialisation, every layer with fan in of 144 or more is one hundred percent dead at three bits: the network is an exactly zero function and no gradient can revive it. Normalise per channel first and the convolutional floor moves from five or six bits down to two. The poster format suits this material because the interesting parts are the tables, and the alleyway format suits it because most of the good questions I have had about this work came from someone pointing at one cell and asking why. Alongside the main result: critical precision rises 0.29 bits per doubling of width but is completely flat across depth, weights saturate at three to four bits while activations need six, and post training damage is U shaped in training tokens rather than monotone.

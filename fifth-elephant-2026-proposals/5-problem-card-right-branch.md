@@ -1,19 +1,3 @@
-# Form fields (do not paste this part)
-
-**Title:** Why Is The Checkpoint You Were About To Ship The Worst One To Compress?
-
-**I am submitting:** Have a problem I want to discuss
-
-**I have a submission for:** Birds of Feather, I have a problem/idea I want like-minded folks to flock around
-
-**Submission type:** Problem/reverse CfP, potential Birds of Feather
-
----
-<!-- PASTE EVERYTHING BELOW THIS LINE INTO THE MARKDOWN BODY -->
----
-
-## The problem
-
 Take one model, compress it after training, and measure the damage. Now do that at seven points along its training run, from 2.1 billion tokens to 300 billion. The damage is not monotone. It falls steeply, bottoms out in the middle of training, and then rises sharply at the end. For a 160 million parameter model at seven bits, the penalty is 0.60 nats early, 0.13 nats at the minimum, and 3.16 nats at the final checkpoint. The most heavily trained checkpoint, the one you would actually ship, is roughly twenty five times worse to compress than one from the middle of its own training run.
 
 I can explain half of this. The early fragility is a scale placement artefact: young weights have not settled into the scale the trained network eventually uses, and putting the scale in the right place removes the effect entirely. At 410 million parameters and 2.1 billion tokens the eight bit penalty goes from +0.399 to +0.003, turning the most fragile checkpoint in the ladder into the least damaged one.

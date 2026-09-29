@@ -1,19 +1,3 @@
-# Form fields (do not paste this part)
-
-**Title:** Two Things I Published, And Then Killed
-
-**I am submitting:** To speak
-
-**I have a submission for:** A talk, 30-40 mins
-
-**Submission type:** Talk/session proposal, 30-40 mins
-
----
-<!-- PASTE EVERYTHING BELOW THIS LINE INTO THE MARKDOWN BODY -->
----
-
-## Describe your session
-
 I published two empirical claims about training neural networks at low precision. Both were plausible, both matched what I had observed, and both are now wrong in my own repository, with the retraction sitting directly underneath the original text. This session is the story of how each one died, because the interesting part is not the claims themselves but the shape of the mistakes, which I think are common and mostly invisible.
 
 The first claim was that low precision training needs a smaller learning rate, since the representable grid is coarser. I had seen a model diverge at one step size and train at another. A dedicated sweep of sixty cells, six precisions crossed with ten learning rates spanning a 640 times range, found not one divergence at any precision, and put the accuracy optimum in the same place for every precision. The curves differ in height, not in position. What the sweep could not do is explain the original observation, because the two recipes differ in optimiser, schedule, dataset and model, and nothing isolates which. So I retired a claim without being able to explain the evidence that produced it, which is an uncomfortable place to stop and an honest one.
