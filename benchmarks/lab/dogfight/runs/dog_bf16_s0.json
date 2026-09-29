@@ -1,0 +1,43 @@
+{
+ "choice_acc": 0.8978269100189209,
+ "choice_balanced_acc": 0.9555217093891568,
+ "per_class": {
+  "pursue": 0.8676974177360535,
+  "lag": 0.9571683406829834,
+  "lead": 0.9460673928260803,
+  "break_left": 0.9698750972747803,
+  "break_right": 0.9746835231781006,
+  "extend": 0.9787270426750183,
+  "high_yoyo": 0.9854153394699097,
+  "low_yoyo": 0.9800999760627747,
+  "recover": 0.9399612545967102
+ },
+ "class_support": {
+  "pursue": 96113,
+  "lag": 5043,
+  "lead": 445,
+  "break_left": 1361,
+  "break_right": 1343,
+  "extend": 5876,
+  "high_yoyo": 1577,
+  "low_yoyo": 20603,
+  "recover": 1549
+ },
+ "score_acc": 0.9804644910760959,
+ "noul_brier": 0.00887246523052454,
+ "noul_ece": 0.016917493136134,
+ "choice_nll": 0.2684215552206312,
+ "exp": "dogfight_qat",
+ "bits": 0,
+ "dtype": "bf16",
+ "quant_act": false,
+ "seed": 0,
+ "d": 256,
+ "depth": 4,
+ "epochs": 2,
+ "params": 2106624,
+ "layers_quantized": 0,
+ "minutes": 21.03681938648224,
+ "tag": "dog_bf16_s0",
+ "complete": true
+}
