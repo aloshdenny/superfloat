@@ -40,13 +40,7 @@ def duel(blue_fn, red_fn, n=40, seed=0, model="f16"):
     return res, times
 
 
-POLICIES = {
-    "expert": E.expert,
-    "pursue": E.naive_pursue,
-    "break": E.naive_break,
-    "extend": E.naive_extend,
-    "random": E.make_random(0),
-}
+POLICIES = dict(E.LEAGUE)
 
 
 def main():

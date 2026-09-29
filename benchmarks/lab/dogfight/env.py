@@ -134,8 +134,9 @@ class Engagement:
         hold = int(WEZ_HOLD_S / DT)
         for _ in range(self.every):
             bs, rs = _state(self.blue), _state(self.red)
-            ba, be, bt = commands(blue_man, bs, rs, bs["nz"])
-            ra, re_, rt = commands(red_man, rs, bs, rs["nz"])
+            t = self.frame * DT
+            ba, be, bt = commands(blue_man, bs, rs, bs["nz"], t)
+            ra, re_, rt = commands(red_man, rs, bs, rs["nz"], t)
             self.blue["fcs/aileron-cmd-norm"] = ba
             self.blue["fcs/elevator-cmd-norm"] = be
             self.blue["fcs/throttle-cmd-norm"] = bt

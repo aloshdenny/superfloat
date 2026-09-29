@@ -42,8 +42,10 @@ def in_his_wez(o):
     return WEZ_MIN_M < o["range_m"] < WEZ_MAX_M and o["red_ata_deg"] < WEZ_ATA_DEG
 
 
-OPPONENTS = {"expert": E.expert, "pursue": E.naive_pursue, "break": E.naive_break,
-             "extend": E.naive_extend, "random": E.make_random(7)}
+# The full league, not one opponent: training against a single scripted expert
+# lets the policy overfit that opponent's habits, and the archetypes demand
+# genuinely different counters (TACTICS.md 3.1).
+OPPONENTS = dict(E.LEAGUE)
 
 
 def generate(episodes=500, seed=0, model="f16"):
