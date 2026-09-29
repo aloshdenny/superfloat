@@ -1,0 +1,42 @@
+{
+ "choice_acc": 0.7971622943878174,
+ "choice_balanced_acc": 0.9260035355885824,
+ "per_class": {
+  "pursue": 0.732283890247345,
+  "lag": 0.9547888040542603,
+  "lead": 0.9797753095626831,
+  "break_left": 0.9360764026641846,
+  "break_right": 0.9717051386833191,
+  "extend": 0.9588155150413513,
+  "high_yoyo": 0.9594166278839111,
+  "low_yoyo": 0.972868025302887,
+  "recover": 0.8683021068572998
+ },
+ "class_support": {
+  "pursue": 96113,
+  "lag": 5043,
+  "lead": 445,
+  "break_left": 1361,
+  "break_right": 1343,
+  "extend": 5876,
+  "high_yoyo": 1577,
+  "low_yoyo": 20603,
+  "recover": 1549
+ },
+ "score_acc": 0.9702337390784855,
+ "noul_brier": 0.018363328650593758,
+ "noul_ece": 0.029164038714952767,
+ "choice_nll": 0.5346019572526557,
+ "exp": "dogfight_qat",
+ "bits": 4,
+ "quant_act": false,
+ "seed": 0,
+ "d": 256,
+ "depth": 4,
+ "epochs": 2,
+ "params": 2106624,
+ "layers_quantized": 9,
+ "minutes": 0.7672122478485107,
+ "tag": "dog_sf4_s0",
+ "complete": true
+}

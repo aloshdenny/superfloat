@@ -1,0 +1,42 @@
+{
+ "choice_acc": 0.927764892578125,
+ "choice_balanced_acc": 0.967922223938836,
+ "per_class": {
+  "pursue": 0.9074006676673889,
+  "lag": 0.9593495726585388,
+  "lead": 0.9730337262153625,
+  "break_left": 0.9772226214408875,
+  "break_right": 0.9895755648612976,
+  "extend": 0.9829816222190857,
+  "high_yoyo": 0.9892200231552124,
+  "low_yoyo": 0.9848080277442932,
+  "recover": 0.9477081894874573
+ },
+ "class_support": {
+  "pursue": 96113,
+  "lag": 5043,
+  "lead": 445,
+  "break_left": 1361,
+  "break_right": 1343,
+  "extend": 5876,
+  "high_yoyo": 1577,
+  "low_yoyo": 20603,
+  "recover": 1549
+ },
+ "score_acc": 0.9867672317227989,
+ "noul_brier": 0.005756579805165529,
+ "noul_ece": 0.00994936708593741,
+ "choice_nll": 0.19284878202980604,
+ "exp": "dogfight_qat",
+ "bits": 0,
+ "quant_act": false,
+ "seed": 0,
+ "d": 256,
+ "depth": 4,
+ "epochs": 4,
+ "params": 2106624,
+ "layers_quantized": 0,
+ "minutes": 0.9314520994822184,
+ "tag": "dog_fp32_s0",
+ "complete": true
+}
