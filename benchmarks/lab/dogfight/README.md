@@ -75,61 +75,67 @@ tournament.py  round-robin validation of the harness
 
 ## Results
 
-Three seeds per arm, 30 epochs, identical data in identical order. fp32 is the
-100% baseline; published numbers for other models are never the reference.
+Three seeds per arm, 30 epochs, identical data in identical order, 21
+manoeuvres against a nine-policy opponent league. fp32 is the 100% baseline;
+published numbers for other models are never the reference.
 
-### Accuracy and calibration disagree, and that is the finding
+| arm | bal. acc | ECE | win rate | closed-loop agreement |
+| --- | --- | --- | --- | --- |
+| fp16 / bf16 | 100.1 / 100.0% | 1.0x | 99.0 / 98.5% | 99.8 / 100.1% |
+| SF8 | 99.9% | 1.1x | 93.9% | 99.0% |
+| SF6 | 99.9% | 1.2x | 97.0% | 97.5% |
+| SF4 | 100.1% | 2.0x | 90.9% | 91.8% |
+| SF3 | 80.9% | 5.1x | 89.8% | 64.6% |
+| SF2 | 78.0% | 5.7x | 78.2% | 63.0% |
+| SF8 + saturated outputs | 99.0% | **0.6x** | 97.5% | 100.6% |
+| SF6 + saturated outputs | 97.0% | **0.7x** | 107.6% | 97.9% |
+| SF4 + saturated outputs | 95.1% | 1.3x | 85.3% | 94.8% |
 
-| arm | balanced acc (rel) | ECE (rel) | closed-loop agreement |
-| --- | --- | --- | --- |
-| fp16 / bf16 | 100.0% | 1.0x | 0.947 / 0.949 |
-| SF8 | 99.9% | 1.1x | 0.945 |
-| SF6 | 99.9% | 1.3x | 0.929 |
-| SF4 | 100.0% | 1.9x | 0.910 |
-| SF3 | 95.5% | 5.5x | 0.692 |
-| SF2 | 95.0% | 5.6x | 0.678 |
-| SF8 + saturated outputs | 99.6% | **0.5x** | **0.961** |
-| SF6 + saturated outputs | 99.3% | 0.6x | 0.936 |
-| SF4 + saturated outputs | 99.4% | 1.0x | 0.901 |
+**Calibration degrades before accuracy.** SF4 is free on balanced accuracy and
+already costs double the calibration error. For a typed-decision model whose
+output *is* a probability, accuracy alone would have called SF4 safe and been
+wrong. The cliff sits between SF4 and SF3 on every axis independently.
 
-SF4 is free on accuracy while already costing nearly double the calibration
-error. Accuracy alone would have called it safe, and for a typed-decision model
-whose output *is* a probability that would have been the wrong call. The cliff
-sits between SF4 and SF3 on every axis.
-
-**Saturating layer outputs improves calibration.** That is the Atreides
-datapath, not the weights-only recipe the rest of the repo measures, and at SF8
-it halves ECE against fp32 for 0.4 points of balanced accuracy. Bounding every
-layer output bounds the hidden state, which shrinks logits and cures
-overconfidence -- an implicit confidence regulariser.
+**Saturating layer outputs improves calibration**, to 0.6x fp32 at SF8. That is
+the Atreides datapath rather than the weights-only recipe the rest of the repo
+measures. Bounding every layer output bounds the hidden state, which shrinks
+logits and cures overconfidence -- an implicit confidence regulariser. It
+replicates the v1 result (0.5x) on a different vocabulary, different opponents
+and a different dataset, so it is not a quirk of one training set.
 
 It contrasts with [PURE_SF.md](../../../PURE_SF.md) section 1, where the same
 literal saturate-every-register recipe destroyed SmolLM2-360M (13.42 against
-2.67 nats). It does not overturn that. The regimes differ -- normalised O(1)
-inputs and a four-block residual here, against a 360M LM whose residual reaches
-tens of thousands -- so the reading is that the datapath question has a
-different answer at control-model scale, which is the scale the hardware
-targets.
+2.67 nats), and does not overturn it: normalised O(1) inputs and a four-block
+residual here against a 360M LM whose residual reaches tens of thousands. The
+datapath question has a different answer at control-model scale, which is the
+scale the hardware targets.
 
-### Closed loop: agreement is the usable metric, win rate is not
+### What the richer vocabulary changed
 
-Agreement degrades monotonically with seed spreads of 0.001-0.02 and reproduces
-the SF4/SF3 cliff exactly. Win rate carries 31-37% draws and spreads up to
-0.029, so although SF4 scores 113% of fp32 it is under 3 sigma on three seeds
-and **is not claimed**.
+The v1 harness had 9 manoeuvres and one opponent, and the expert answered
+`pursue` to 71% of states. v2 has 21 manoeuvres and a nine-policy league, with
+a 28% top class. Holding everything else fixed, that made the damage visible:
 
-**Crash rate falls as the model degrades** -- 10.5% at SF2 against 26.5% at
-fp32 -- and that is a trap, not a win. A degraded policy becomes passive, stops
-chasing, and so neither hits the ground nor wins. This is the same artefact as
-the BFCL irrelevance scores in [TOOL_USE_QAT.md](../../../TOOL_USE_QAT.md)
-section 6, where a model that had stopped emitting tool calls scored 100% on
-correctly declining to call them. A crash rate without a win rate beside it is
-not interpretable.
+| | v1 | v2 |
+| --- | --- | --- |
+| SF3 balanced accuracy | 95.5% | **80.9%** |
+| SF3 closed-loop agreement | 73.0% | **64.6%** |
+| SF4 closed-loop agreement | 96.0% | 91.8% |
 
-The cloned policy wins about 29% against its own teacher and crashes a quarter
-of the time. Behaviour cloning is not expected to match the expert; what the
-study needs is a stable reference, and the relative comparison across
-precisions is the result.
+The easy task was hiding the degradation, not the format tolerating it.
+
+**Win rate is still the weakest metric.** SF2 is now cleanly resolved at 78.2%
+(about 3.4 sigma), which v1 could not do, but SF4 at 90.9% is about 2.1 sigma
+on three seeds and **is not claimed**. Agreement resolves the whole band and
+win rate does not.
+
+**The crash-rate artefact is gone.** v1 showed crash rate *falling* as the model
+degraded -- 10.5% at SF2 against 26.5% at fp32 -- because a degraded policy went
+passive and neither chased nor crashed, the same shape as the BFCL irrelevance
+trap in [TOOL_USE_QAT.md](../../../TOOL_USE_QAT.md) section 6. v2 is flat at
+0.21-0.26 across every arm with SF3 highest. Letting `recover` compete against
+20 alternatives rather than 8 removed the passivity failure mode, so crash rate
+is now interpretable on its own.
 
 ### Latency: the GPU is the denominator, not the answer
 
@@ -141,26 +147,36 @@ then an ordinary Linear with no quantizer in the loop):
 | deployed p50 | 0.33 ms | 0.33 | 0.33 | 0.33 | 0.34 | 0.32 |
 | weights | 8229 KiB | 2057 | 1543 | 1029 | 771 | 514 |
 
-Latency is flat across precisions, as it must be: a GPU has no narrow datapath
-to exploit. A first pass showed a 1.294x spread, which an order control
-disproved -- measuring fp32 both first and last gives as much difference as
-fp32 against SF4 (1.034x at 4000 iterations). It was warmup.
+Flat across precisions, as it must be: a GPU has no narrow datapath to exploit.
+A first pass showed 1.294x spread, which an order control disproved -- fp32
+measured first and last differs as much as fp32 against SF4 (1.034x at 4000
+iterations). It was warmup.
 
-Two things do not come from the GPU. Timing an `SFLinear` model measures the
-cost of *simulating* the format, which is 2-10x and points the wrong way.
-And the real per-precision difference is the 16x weight footprint, which
-decides whether the policy streams from DRAM or sits in on-chip SRAM.
-
-At 2.11M MACs per decision the bridge to hardware is
+Timing an `SFLinear` model measures the cost of *simulating* the format, 2-10x,
+pointing the wrong way. The real per-precision difference is the 16x weight
+footprint, which decides whether the policy streams from DRAM or sits in
+on-chip SRAM. At 2.11M MACs per decision the bridge to hardware is
 
     cycles ~= MACs / PEs,  latency = cycles / Fmax
 
-giving 8224 cycles on a 256-PE array, or 0.082 ms at 100 MHz -- about 4x
-faster than the 4090. That is not a surprising result so much as a statement
-about the regime: at batch 1 on a 2.11M-parameter model the GPU is bound by
-kernel launch overhead, not arithmetic, which is exactly the case a small
-fixed-point accelerator is for. Replace the projection with measured RTL
-numbers before quoting it.
+giving 8224 cycles on a 256-PE array, or 0.082 ms at 100 MHz, about 4x faster
+than the 4090 -- because at batch 1 on a 2.11M model the GPU is bound by kernel
+launch overhead rather than arithmetic. Replace with measured RTL before
+quoting.
+
+### Airframes
+
+`airframes.py` surveys the stock JSBSim roster for supersonic fighters.
+Confirmed and usable: **f16 (Mach 1.51), f15 (1.72), F4N (1.08)**, with **A4
+correctly subsonic at 0.84** -- useful as an asymmetric matchup, since a
+subsonic angles fighter against supersonic energy fighters is a real fight.
+`f22`, `T38` and `F80C` depart under automated control and need per-model FCS
+work; the f22 matters most because it is the only thrust-vectoring airframe and
+gates the whole post-stall manoeuvre class in [TACTICS.md](TACTICS.md).
+
+Turn-rate figures in that file are provisional: only the f16 reaches its G
+limit across the speed grid, so corner velocity and sustained rate for the
+others are not yet trustworthy.
 
 ## What is not established
 
