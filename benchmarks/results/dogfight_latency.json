@@ -1,0 +1,168 @@
+{
+ "exp": "dogfight_latency",
+ "device": "cuda",
+ "d": 256,
+ "depth": 4,
+ "params": 2106624,
+ "macs_per_decision": 2105344,
+ "arms": [
+  {
+   "bits": 0,
+   "deployed": {
+    "mean_ms": 1.2944991723676746,
+    "p50_ms": 0.41799700011324603,
+    "p99_ms": 3.1246220005414216,
+    "min_ms": 0.29428400011966005
+   },
+   "simulated": null,
+   "weight_kib": 8229.0
+  },
+  {
+   "bits": 8,
+   "deployed": {
+    "mean_ms": 0.4740407930118333,
+    "p50_ms": 0.3606589998526033,
+    "p99_ms": 2.335647001018515,
+    "min_ms": 0.29051700039417483
+   },
+   "simulated": {
+    "mean_ms": 0.8716189263323031,
+    "p50_ms": 0.7041950011625886,
+    "p99_ms": 5.171536000489141,
+    "min_ms": 0.5670179998560343
+   },
+   "weight_kib": 2057.25
+  },
+  {
+   "bits": 6,
+   "deployed": {
+    "mean_ms": 0.35930720466118754,
+    "p50_ms": 0.32837799881235696,
+    "p99_ms": 0.5529059999389574,
+    "min_ms": 0.2902169999288162
+   },
+   "simulated": {
+    "mean_ms": 0.7695537863407177,
+    "p50_ms": 0.6800299997848924,
+    "p99_ms": 5.119268000271404,
+    "min_ms": 0.5624890000035521
+   },
+   "weight_kib": 1542.9375
+  },
+  {
+   "bits": 4,
+   "deployed": {
+    "mean_ms": 0.3499539943331911,
+    "p50_ms": 0.3274160008004401,
+    "p99_ms": 0.5634210010612151,
+    "min_ms": 0.2941740003734594
+   },
+   "simulated": {
+    "mean_ms": 0.677740742004365,
+    "p50_ms": 0.6775350011594128,
+    "p99_ms": 0.9214190013153711,
+    "min_ms": 0.5688810015271883
+   },
+   "weight_kib": 1028.625
+  },
+  {
+   "bits": 3,
+   "deployed": {
+    "mean_ms": 0.36276500699993147,
+    "p50_ms": 0.3370750000613043,
+    "p99_ms": 0.5988180000713328,
+    "min_ms": 0.2951160004158737
+   },
+   "simulated": {
+    "mean_ms": 0.7442305590072161,
+    "p50_ms": 0.6769339997845236,
+    "p99_ms": 4.933005000566482,
+    "min_ms": 0.5703530005121138
+   },
+   "weight_kib": 771.46875
+  },
+  {
+   "bits": 2,
+   "deployed": {
+    "mean_ms": 0.3443343250213123,
+    "p50_ms": 0.3229180001653731,
+    "p99_ms": 0.4903939989162609,
+    "min_ms": 0.2889639999921201
+   },
+   "simulated": {
+    "mean_ms": 1.130684264321341,
+    "p50_ms": 0.6919829993421445,
+    "p99_ms": 5.689452000297024,
+    "min_ms": 0.5611559990938986
+   },
+   "weight_kib": 514.3125
+  }
+ ],
+ "gpu_p50_spread": 1.2944369774963953,
+ "atreides_projection": {
+  "pes": 256,
+  "fmax_mhz": 100.0,
+  "cycles_per_decision": 8224.0,
+  "latency_ms": 0.08224,
+  "note": "one MAC per PE per cycle; replace with measured RTL numbers"
+ },
+ "complete": true,
+ "order_control": {
+  "exp": "dogfight_latency",
+  "device": "cuda",
+  "d": 256,
+  "depth": 4,
+  "params": 2106624,
+  "macs_per_decision": 2105344,
+  "arms": [
+   {
+    "bits": 0,
+    "deployed": {
+     "mean_ms": 0.35761350324037267,
+     "p50_ms": 0.3289989999757381,
+     "p99_ms": 0.5468700001074467,
+     "min_ms": 0.29046700001345016
+    },
+    "simulated": null,
+    "weight_kib": 8229.0
+   },
+   {
+    "bits": 4,
+    "deployed": {
+     "mean_ms": 0.5834056420053457,
+     "p50_ms": 0.32661500154063106,
+     "p99_ms": 2.786686000035843,
+     "min_ms": 0.2871609995054314
+    },
+    "simulated": {
+     "mean_ms": 0.8408211520072655,
+     "p50_ms": 0.6814600001234794,
+     "p99_ms": 5.0967799998034025,
+     "min_ms": 0.5618649993266445
+    },
+    "weight_kib": 1028.625
+   },
+   {
+    "bits": 0,
+    "deployed": {
+     "mean_ms": 0.5768321475034099,
+     "p50_ms": 0.33785599953262135,
+     "p99_ms": 2.8622780009754933,
+     "min_ms": 0.2899049995903624
+    },
+    "simulated": null,
+    "weight_kib": 8229.0
+   }
+  ],
+  "gpu_p50_spread": 1.0344166616320956,
+  "atreides_projection": {
+   "pes": 256,
+   "fmax_mhz": 100.0,
+   "cycles_per_decision": 8224.0,
+   "latency_ms": 0.08224,
+   "note": "one MAC per PE per cycle; replace with measured RTL numbers"
+  },
+  "complete": true
+ },
+ "note": "deployed p50 is identical across precisions; the 1.294x spread in this run is warmup, confirmed by an order control in which fp32 measured first and last differ by as much as fp32 vs SF4 (1.034x at 4000 iters)"
+}
