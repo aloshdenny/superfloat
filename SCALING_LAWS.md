@@ -1105,3 +1105,59 @@ token budget -- not 1–2 epochs. Waiting longer does not bank a steeper
 curve, because there is not one. This is the same conclusion the vision
 benchmarks reached from final accuracy: SF8 is indistinguishable from SF16,
 and the extra bits do not buy a faster path to that tie.
+
+---
+
+## 9. The depth limit on SF-only hardware
+
+Section 5.5 found that depth does not move the critical precision and that the
+penalty *shrinks* as a network deepens. That result is weights-only: activations
+stay FP32. On hardware that has no FP32 anywhere -- every register Q1.(n-1),
+which is what the Atreides datapath is -- the answer inverts.
+
+CIFAR-100 ResNets, 60 epochs, seed 0, channel normalisation throughout. The
+"full datapath" arms saturate the residual sum as well as weights and conv
+inputs, which is what an SF-only register file actually does.
+
+| arm | d20 | d32 | d44 | d56 |
+| --- | --- | --- | --- | --- |
+| FP32 control | 62.21 | 64.36 | 65.85 | 66.15 |
+| SF16 weights only | **63.31** | **65.01** | **66.12** | **66.86** |
+| SF16 + activations | 62.78 | 64.14 | 64.56 | 61.91 |
+| SF16 full datapath | 54.52 | 50.68 | 44.57 | 29.65 |
+| SF8 full datapath | 54.15 | 51.13 | 44.99 | 21.16 |
+
+**Weights-only SF16 beats FP32 at every depth**, by +0.27 to +1.10, reproducing
+5.5 on a second axis. Depth is free when the activations are not quantized.
+
+**On a full datapath the optimum is depth 20 and deeper is worse.** Accuracy
+runs backwards, 54.52 to 29.65, the exact inverse of the FP32 column. A
+ResNet-56 on SF-only hardware lands 36.5 points below its FP32 control, and no
+amount of training recovers it.
+
+**The damage is range, not resolution.** SF8 and SF16 are within half a point of
+each other in the full-datapath arm at depth 20 (54.15 against 54.52). If this
+were grid coarseness, halving the bits would cost something; it does not. What
+breaks is the residual sum overflowing a bounded register, and adding bits does
+not add range.
+
+That matches the growth law measured on an MLP in the sibling dogfight study,
+`peak ~ 1.06 x depth^0.92`. A ResNet is worse because BatchNorm hands each
+block a unit-variance contribution to accumulate: the measured residual peak is
+45x the SF16 bound at depth 20 and 106x at depth 56, growing as `depth^0.84`.
+
+### Consequence: breadth, not depth
+
+Depth is capped by **range**. Width costs **precision** -- tier C measured +1.12
+bits over 16x width. And weights-only SF16 beating FP32 says the precision
+budget has slack while the range budget has none. Spending the surplus on width
+therefore relieves the binding constraint, which is the opposite of the usual
+advice that deeper is cheaper than wider.
+
+The architectural alternatives worth testing before accepting a depth cap of 20
+are a periodic residual renormalisation (PURE_SF.md section 3 bounds the
+residual exactly, at the cost of a runtime divide) and splitting the residual
+per stage so it never accumulates across the whole network.
+
+`benchmarks/results/cnn_depth_datapath.jsonl`. One seed; the SF8-vs-SF16
+agreement at depth 20 is the load-bearing comparison and it is a single pair.

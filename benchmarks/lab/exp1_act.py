@@ -24,8 +24,11 @@ import numpy as np, torch, torch.nn as nn, torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from superfloat import disable_tf32, sf_params, sf_quantize_sv
 
-DATA = "/workspace/cifar100"
-OUT = "/workspace/results"
+# Every other lab script takes its paths from the environment, which is what
+# makes them portable across RunPod / tinkerspace / Modal / the WSL box. This
+# one hardcoded /workspace and could not run anywhere else.
+DATA = os.environ.get("EXP1_DATA", "/workspace/cifar100")
+OUT = os.environ.get("EXP1_OUT", "/workspace/results")
 MEAN = (0.5071, 0.4865, 0.4409); STD = (0.2673, 0.2564, 0.2762)
 
 
@@ -66,7 +69,16 @@ class SFConv(nn.Conv2d):
         return self._conv_forward(x, w, None)
 
 
-def build(width_mult=1.0, classes=100, depth=20):
+def build(width_mult=1.0, classes=100, depth=20, res_bits=0):
+    """res_bits>0 saturates the RESIDUAL SUM as well as conv inputs.
+
+    `--bits-a` puts conv inputs on the grid, which is what 5.5 and tier C
+    measure, but the residual addition stays fp32. On SF-only hardware that sum
+    lands in a Q1.(n-1) register like everything else, and it is the term that
+    accumulates with depth -- measured at ~1.06 * depth^0.92 on the dogfight
+    MLP. This is the switch that makes the CNN arm a real datapath arm.
+    """
+    res_s, res_v = sf_params(res_bits) if res_bits else (0, 0)
     n = (depth - 2) // 6
     w = [max(1, int(16 * width_mult)), max(1, int(32 * width_mult)),
          max(1, int(64 * width_mult))]
@@ -84,7 +96,10 @@ def build(width_mult=1.0, classes=100, depth=20):
             s.r = nn.ReLU(inplace=True)
         def forward(s, x):
             o = s.r(s.b1(s.c1(x)))
-            return s.r(s.b2(s.c2(o)) + s.sc(x))
+            h = s.b2(s.c2(o)) + s.sc(x)
+            if res_bits:
+                h = sf_quantize_sv(h, res_s, res_v)
+            return s.r(h)
 
     layers = [SFConv(3, w[0], 3, 1, 1, bias=False),
               nn.BatchNorm2d(w[0], eps=0.125), nn.ReLU(inplace=True)]
@@ -132,6 +147,11 @@ def main():
     ap.add_argument("--bits-a", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--depth", type=int, default=20)
+    ap.add_argument("--width-mult", type=float, default=1.0,
+                    help="channel multiplier; the breadth axis when depth is "
+                         "capped by residual range on an SF-only datapath")
+    ap.add_argument("--res-bits", type=int, default=0,
+                    help="saturate the residual sum too; 0 leaves it fp32")
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -141,12 +161,15 @@ def main():
     a = ap.parse_args()
 
     disable_tf32(); torch.manual_seed(a.seed)
-    tag = (f"{a.tag_prefix}_w{a.bits_w}_a{a.bits_a}_d{a.depth}_s{a.seed}"
+    tag = (f"{a.tag_prefix}_w{a.bits_w}_a{a.bits_a}"
+           + (f"_r{a.res_bits}" if a.res_bits else "")
+           + (f"_x{a.width_mult:g}" if a.width_mult != 1.0 else "")
+           + f"_d{a.depth}_s{a.seed}"
            + ("_plain" if a.no_chan_norm else ""))
     if os.path.exists(f"{OUT}/{tag}.json"):
         print(f"[{tag}] already done, skipping", flush=True); return
 
-    model = build(depth=a.depth).cuda()
+    model = build(width_mult=a.width_mult, depth=a.depth, res_bits=a.res_bits).cuda()
     nconv = 0
     for m in model.features.modules():
         if isinstance(m, SFConv):
@@ -194,6 +217,7 @@ def main():
             clip.append(float(m.clip_n.item()) / max(int(m.seen_n.item()), 1))
             scales.append(float(m.a_scale.item()))
     rec = {"exp": a.tag_prefix, "chan_norm": not a.no_chan_norm,
+           "res_bits": a.res_bits, "width_mult": a.width_mult,
            "bits_w": a.bits_w, "bits_a": a.bits_a,
            "clip_frac_mean": (sum(clip)/len(clip)) if clip else 0.0,
            "clip_frac_max": max(clip) if clip else 0.0,
