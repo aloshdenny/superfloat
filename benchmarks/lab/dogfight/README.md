@@ -137,6 +137,49 @@ trap in [TOOL_USE_QAT.md](../../../TOOL_USE_QAT.md) section 6. v2 is flat at
 20 alternatives rather than 8 removed the passivity failure mode, so crash rate
 is now interpretable on its own.
 
+### Is this a pure SF datapath? Not yet, and the gap is measurable
+
+The `+act` arms saturate weights and every Linear output, which is the closest
+this repository gets to the Atreides datapath. It is still not every register.
+`datapath_audit.py` measures the gap on a trained `sf8_act` policy rather than
+arguing about it -- 13 of 26 sites exceed the SF8 bound:
+
+| site | peak abs | x bound |
+| --- | --- | --- |
+| fc_in / fc_out outputs, all blocks | 0.9922 | 1.0x, exactly at the rail |
+| SiLU outputs | 0.7238 | 0.7x |
+| residual after add, blocks 0 -> 3 | 1.73 -> 3.64 | 1.7x -> 3.7x |
+| RMSNorm outputs | 2.4 - 6.2 | up to 6.3x |
+| input features | 4.63 | 4.7x |
+| head logits | 15.9 - 18.7 | ~18x (excluded by design) |
+
+**The residual accumulates with depth**, 1.7x to 3.7x across four blocks, which
+is the mechanism [PURE_SF.md](../../../PURE_SF.md) section 3 describes and why
+the same recipe destroyed SmolLM2-360M at 32 blocks. The size of the gap is the
+finding: **3.7x here against tens of thousands for the LLM**, four orders of
+magnitude apart.
+
+That changes the fix. The LLM needed a per-token block-float scale, which is
+runtime silicon the format exists to remove. This needs roughly 4x of *static*
+headroom, which is a format choice with no multiplier:
+
+- run the residual as **Q3.5 instead of Q1.7** -- three integer bits covers
+  +-4, costing two bits of fraction and no hardware
+- clamp the input encoder, which is free; `_SCALE` currently divides without
+  bounding, so features reach 4.7x
+- the heads stay wider, consistent with every other study here keeping the
+  output layer out of the grid, but it should be stated rather than assumed
+
+Note that `fc_in` and `fc_out` sit at exactly vmax, so saturation is *binding*
+rather than slack -- real clipping happens every forward -- and that arm still
+reaches 99.0% of fp32 balanced accuracy with better calibration. The clipping
+regularises rather than damages, which is the ECE result seen from the other
+side.
+
+RMSNorm's rsqrt and mean-of-squares, and SiLU's sigmoid, are not SF operations
+at all and would need their own treatment in silicon. They are bounded here
+(SiLU peaks at 0.72) but they are not on the grid.
+
 ### Latency: the GPU is the denominator, not the answer
 
 Measured on an RTX 4090, batch 1, deployed weights (rounded to the grid once,
