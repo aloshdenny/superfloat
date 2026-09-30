@@ -294,3 +294,35 @@ block floating point anywhere in the design.
 Read narrowly: one model shape at depth 4. Whether 29% clipping stays harmless
 at depth 16 is exactly what the depth sweep is for, and until that lands this
 is a four-block result.
+
+### Residual growth is linear in depth, and does not explain the LLM
+
+Auditing `sf8_act` with the residual left unsaturated, across depth:
+
+| depth | peak residual | x SF8 bound |
+| --- | --- | --- |
+| 2 | 1.996 | 2.01x |
+| 4 | 3.750 | 3.78x |
+| 8 | 7.512 | 7.57x |
+| 16 | 13.312 | 13.42x |
+
+Fitting gives **peak ~ 1.06 x depth^0.92**, essentially linear, which is what
+the mechanism predicts: `fc_out` saturates at +-0.992, so each block adds a
+bounded contribution and the residual accumulates about one unit per block.
+
+**Extrapolated to 32 blocks that is 26x, not tens of thousands.** So depth
+alone does not account for the SmolLM2-360M failure in
+[PURE_SF.md](../../../PURE_SF.md) section 1 -- it misses by nearly three orders
+of magnitude. The remaining candidates are width, since a 2048-wide model
+takes dot products over eight times the fan-in, and attention, which this
+policy does not have at all. That is a narrowing rather than an answer: the
+LLM explosion is not a depth effect.
+
+Quantization cost does grow with depth, but gently. `sf8_act` against its own
+fp32 control: 100.2% at depth 2, 99.0% at 4, 98.8% at 8, 98.0% at 16.
+
+**What this does not settle.** The residual-format arms were all trained at
+depth 4, where the unsaturated peak is 3.8x. At depth 16 it is 13.4x, so Q1.7
+would clip far harder than the 29% measured there, and whether it stays free is
+untested. The Q1.7 recommendation above is a depth-4 result and should not be
+carried to a deep model without running that cell.
