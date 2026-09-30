@@ -253,3 +253,44 @@ tournament.py  round-robin validation of the harness
 
 Results land in `benchmarks/results/dogfight_{qat,closed_loop}.jsonl` and
 `dogfight_latency.json`; the figure is `benchmarks/figures/lab_dogfight_qat.png`.
+
+### Residual format: Q1.7 is enough, and I predicted otherwise
+
+The audit above measured a residual peaking at 3.7x the SF8 bound and I
+concluded the datapath needed Q3.5 -- two integer bits of headroom, paid for
+with two bits of fraction. Training arms under each format says that was wrong.
+
+`sf8_act`, residual sum held at a fixed-point format, 3 seeds:
+
+| residual format | range / step | bal. acc (rel fp32) | ECE (rel) |
+| --- | --- | --- | --- |
+| unsaturated (control) | unbounded | 99.0% +-0.002 | 0.6x |
+| **Q1.7** | +-0.992, step 0.0078 | **98.7% +-0.007** | 0.5x |
+| Q2.6 | +-1.984, step 0.0156 | 99.1% +-0.006 | 0.6x |
+| Q3.5 | +-3.969, step 0.0312 | 98.9% +-0.001 | 0.6x |
+| Q4.4 | +-7.938, step 0.0625 | 99.0% +-0.003 | 0.5x |
+
+Every format is within 0.4 points against seed spreads of 0.001-0.007. The
+3.7x was measured on a model that had never been asked to live inside the
+bound; it says what an unconstrained model happens to do, not what it can do.
+
+The mechanism is not simply that the model adapts, because it only adapts
+half way:
+
+| arm | pre-saturation peak | % of residual writes clipped |
+| --- | --- | --- |
+| unsaturated | 3.64 | - |
+| Q1.7 | 1.98 | **29.0%** |
+| Q3.5 | 3.73 | 0.0% |
+
+Training under Q1.7 halves the peak, and then clips 29% of residual writes
+anyway, for 0.3 points of balanced accuracy -- inside noise. **Clipping a third
+of the residual stream is free at this shape.**
+
+For the datapath that means the residual register is plain Q1.7, the same grid
+as the weights and the layer outputs: no integer bits, no split format, no
+block floating point anywhere in the design.
+
+Read narrowly: one model shape at depth 4. Whether 29% clipping stays harmless
+at depth 16 is exactly what the depth sweep is for, and until that lands this
+is a four-block result.

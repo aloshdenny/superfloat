@@ -27,7 +27,7 @@ for _p in (os.path.join(_here, "..", ".."), os.path.join(_here, ".."), _here):
     sys.path.insert(0, os.path.abspath(_p))
 from superfloat import apply_superfloat, clamp_all, disable_tf32
 
-from policy import Policy, N_MAN, param_count
+from policy import Policy, N_MAN, param_count, set_residual_format, residual_format
 from pilot import MANEUVERS
 
 OUT = os.environ.get("DOGFIGHT_OUT", "runs")
@@ -111,6 +111,10 @@ def main():
     ap.add_argument("--depth", type=int, default=4)
     ap.add_argument("--dtype", default="fp32", choices=["fp32", "fp16", "bf16"],
                     help="reduced-precision baseline; autocast, not a pure half datapath")
+    ap.add_argument("--res-int-bits", type=int, default=-1,
+                    help="saturate the residual SUM at Q(n+1).(bits-1-n); "
+                         "-1 leaves it unsaturated, which is what every other "
+                         "study in this repo does")
     ap.add_argument("--quant-act", action="store_true",
                     help="also saturate layer outputs (the datapath question)")
     a = ap.parse_args()
@@ -124,11 +128,21 @@ def main():
     model = Policy(a.d, a.depth).to(dev)
     amp = AMP[a.dtype]
     base = f"sf{a.bits}" if a.bits else a.dtype
-    tag = f"dog_{base}{'_act' if a.quant_act else ''}_s{a.seed}"
+    tag = f"dog_{base}{'_act' if a.quant_act else ''}"
+    if a.depth != 4:
+        tag += f"_d{a.depth}"
+    tag += f"_s{a.seed}"
     nconv = 0
     if a.bits:
         nconv = apply_superfloat(model, a.bits, head_names=HEADS,
                                  quantize_activations=a.quant_act)
+    res_fmt = None
+    if a.res_int_bits >= 0:
+        bits = a.bits or 8
+        sc, vm = set_residual_format(model, bits, a.res_int_bits)
+        res_fmt = {"total_bits": bits, "int_bits": a.res_int_bits,
+                   "step": 1.0 / sc, "vmax": vm}
+        tag += "_r%d" % a.res_int_bits
     print(f"[{tag}] {param_count(model)/1e6:.2f}M params, {nconv} layers quantized, dev={dev}")
 
     w = class_weights(Yc, N_MAN).to(dev)
@@ -166,13 +180,15 @@ def main():
                   flush=True)
 
     m = evaluate(model, Xv, Ycv, Ysv, Ynv, dev, amp=amp)
-    m.update(exp="dogfight_qat", bits=a.bits, dtype=a.dtype, quant_act=bool(a.quant_act), seed=a.seed,
+    m.update(exp="dogfight_qat", bits=a.bits, dtype=a.dtype, res_fmt=res_fmt,
+             res_int_bits=a.res_int_bits, quant_act=bool(a.quant_act), seed=a.seed,
              d=a.d, depth=a.depth, epochs=a.epochs, params=param_count(model),
              layers_quantized=nconv, minutes=(time.time()-t0)/60, tag=tag, complete=True)
     os.makedirs(OUT, exist_ok=True)
     json.dump(m, open(os.path.join(OUT, tag + ".json"), "w"), indent=1)
     torch.save({"model": model.state_dict(), "cfg": {"d": a.d, "depth": a.depth,
-               "bits": a.bits, "quant_act": bool(a.quant_act), "dtype": a.dtype}},
+               "bits": a.bits, "quant_act": bool(a.quant_act), "dtype": a.dtype,
+               "res_int_bits": a.res_int_bits}},
                os.path.join(OUT, tag + ".pt"))
     print(f"[{tag}] done in {m['minutes']:.1f}m -> acc {m['choice_acc']:.4f} "
           f"bal {m['choice_balanced_acc']:.4f} ece {m['noul_ece']:.5f}")

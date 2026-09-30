@@ -20,9 +20,17 @@ from __future__ import annotations
 
 import math
 
+import os
+import sys
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+_here = os.path.dirname(os.path.abspath(__file__))
+for _p in (os.path.join(_here, "..", ".."), os.path.join(_here, ".."), _here):
+    sys.path.insert(0, os.path.abspath(_p))
+from superfloat import sf_quantize_sv
 
 from pilot import MANEUVERS
 
@@ -65,16 +73,27 @@ class RMSNorm(nn.Module):
 
 
 class Block(nn.Module):
-    """Pre-norm residual MLP. `fc_in` is norm-fed (absorbable); `fc_out` is not."""
+    """Pre-norm residual MLP. `fc_in` is norm-fed (absorbable); `fc_out` is not.
+
+    `res_scale`/`res_vmax`, when set, saturate the residual SUM -- the register
+    a real datapath writes the accumulator back into. Leaving them None is the
+    default everywhere else in this repo and is what the datapath audit found
+    escaping the grid.
+    """
 
     def __init__(self, d, mult=4):
         super().__init__()
         self.norm = RMSNorm(d)
         self.fc_in = nn.Linear(d, mult * d, bias=False)
         self.fc_out = nn.Linear(mult * d, d, bias=False)
+        self.res_scale = None
+        self.res_vmax = None
 
     def forward(self, x):
-        return x + self.fc_out(F.silu(self.fc_in(self.norm(x))))
+        h = x + self.fc_out(F.silu(self.fc_in(self.norm(x))))
+        if self.res_scale is not None:
+            h = sf_quantize_sv(h, self.res_scale, self.res_vmax)
+        return h
 
 
 class Policy(nn.Module):
@@ -107,6 +126,25 @@ class Policy(nn.Module):
                          device=next(self.parameters()).device)
         c, s, n = self(x)
         return MANEUVERS[int(c.argmax(-1))], int(s.argmax(-1)), float(torch.sigmoid(n))
+
+
+def residual_format(total_bits, int_bits):
+    """Q(int_bits+1).(total-1-int_bits) as a (scale, vmax) pair.
+
+    int_bits=0 is the plain SF grid this repo uses everywhere: SF8 -> Q1.7,
+    step 1/128, range +-127/128. int_bits=2 gives Q3.5: step 1/32, range
+    +-3.97, which is the headroom the audit says a 4-block residual needs.
+    """
+    scale = 2.0 ** (total_bits - 1 - int_bits)
+    vmax = (2.0 ** (total_bits - 1) - 1) / scale
+    return scale, vmax
+
+
+def set_residual_format(model, total_bits, int_bits):
+    scale, vmax = residual_format(total_bits, int_bits)
+    for b in model.blocks:
+        b.res_scale, b.res_vmax = scale, vmax
+    return scale, vmax
 
 
 def param_count(m):

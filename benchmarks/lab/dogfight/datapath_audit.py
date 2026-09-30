@@ -27,7 +27,7 @@ for _p in (os.path.join(_here, "..", ".."), os.path.join(_here, ".."), _here):
     sys.path.insert(0, os.path.abspath(_p))
 from superfloat import sf_params, apply_superfloat
 
-from policy import Policy
+from policy import Policy, set_residual_format
 from pilot import MANEUVERS
 
 HEADS = ("head_choice", "head_score", "head_noul")
@@ -41,6 +41,8 @@ def audit(ckpt, data, bits_override=None, n=20000):
     if cfg.get("bits"):
         apply_superfloat(m, cfg["bits"], head_names=HEADS,
                          quantize_activations=cfg.get("quant_act", False))
+    if cfg.get("res_int_bits", -1) >= 0:
+        set_residual_format(m, cfg.get("bits") or 8, cfg["res_int_bits"])
     m.load_state_dict(blob["model"]); m.eval()
     scale, vmax = sf_params(bits)
 
