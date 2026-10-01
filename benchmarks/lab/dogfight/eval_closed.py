@@ -74,6 +74,11 @@ def play(model, n=200, seed=1234, dev="cpu", amp=None):
     return {
         "wins": w, "losses": l, "draws": n - w - l, "n": n,
         "win_rate": w / n, "loss_rate": l / n,
+        # Draws are a third of all engagements, so dividing by n caps a perfect
+        # policy near 0.63 and dilutes every comparison. `decisive_rate` is the
+        # same data over resolved fights only, and it separates arms that
+        # `win_rate` cannot.
+        "decisive_rate": (w / (w + l)) if (w + l) else None,
         "crash_rate": res["blue_crash"] / n,
         "agreement": agree / max(total, 1),
         "decisions": total,

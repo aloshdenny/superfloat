@@ -124,10 +124,35 @@ a 28% top class. Holding everything else fixed, that made the damage visible:
 
 The easy task was hiding the degradation, not the format tolerating it.
 
-**Win rate is still the weakest metric.** SF2 is now cleanly resolved at 78.2%
-(about 3.4 sigma), which v1 could not do, but SF4 at 90.9% is about 2.1 sigma
-on three seeds and **is not claimed**. Agreement resolves the whole band and
-win rate does not.
+**Win rate needs its denominator fixed before it says anything.** A draw is
+neither a win nor a loss but stays in the denominator, and 38% of engagements
+end in a timeout or mutual kill, so `win_rate = wins/n` caps a perfect policy
+near 0.63 and dilutes every comparison.
+
+Scoring resolved fights only, `decisive_rate = wins/(wins+losses)`:
+
+| arm | win_rate (rel) | decisive (rel) | sigma |
+| --- | --- | --- | --- |
+| fp32 | 0.328 (100%) | **0.529** (100%) | - |
+| SF8 | 93.9% | 94.3% | -1.0 |
+| SF6 | 97.0% | 95.4% | -1.1 |
+| SF4 | 90.9% | 88.9% | **-2.9** |
+| SF3 | 89.8% | 75.9% | **-6.7** |
+| SF2 | 78.2% | 68.6% | **-9.4** |
+| SF6 + sat outputs | 107.6% | 101.3% | +0.2 |
+
+fp32 lands at 0.529, so the cloned policy is essentially even with the teacher
+it was cloned from on fights that actually resolve -- a far more interpretable
+number than 0.328.
+
+This **corrects an earlier claim in this file** that win rate could not resolve
+the SF8-to-SF4 band. Undiluted it can: SF4 is a real -11% at -2.9 sigma, the
+ordering is monotonic, and it agrees with what the agreement metric found
+independently. It also removes the apparent SF6+act win over fp32, which drops
+to +0.2 sigma and was a draw-counting artefact.
+
+Three seeds, so these sigmas come from a 3-point standard deviation: SF3 and
+SF2 are safe, SF4 is suggestive rather than settled.
 
 **The crash-rate artefact is gone.** v1 showed crash rate *falling* as the model
 degraded -- 10.5% at SF2 against 26.5% at fp32 -- because a degraded policy went
