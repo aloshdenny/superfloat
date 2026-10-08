@@ -1154,10 +1154,32 @@ budget has slack while the range budget has none. Spending the surplus on width
 therefore relieves the binding constraint, which is the opposite of the usual
 advice that deeper is cheaper than wider.
 
+Measured, ResNet-20 at the SF-only depth optimum, varying channel width:
+
+| | 1x | 1.5x | 2x | 3x | 4x |
+| --- | --- | --- | --- | --- | --- |
+| FP32 | 62.46 | 67.42 | 68.88 | 71.87 | 74.29 |
+| SF16 full datapath | 54.41 | 61.25 | 64.79 | **68.17** | **69.68** |
+| delta | -8.05 | -6.17 | -4.09 | **-3.70** | -4.61 |
+
+**Breadth recovers what depth cannot.** SF-only at 3x width reaches 68.17,
+above the FP32 ResNet-56 (66.15) that the same datapath could only take to
+29.65 by deepening. And the SF penalty *shrinks* with width, -8.05 to -3.70,
+which is the opposite of tier C's +1.12 bits over 16x.
+
+Both facts follow from the same mechanism. Tier C's width law is about dead
+weights at fixed depth under weights-only quantization, a precision effect.
+Here the binding constraint is residual range, and widening adds capacity
+without adding a single term to the residual sum, so the extra capacity
+absorbs the clipping while the accumulation stays fixed. Width and depth are
+not interchangeable on this hardware, and the preference is the reverse of the
+usual one.
+
 The architectural alternatives worth testing before accepting a depth cap of 20
 are a periodic residual renormalisation (PURE_SF.md section 3 bounds the
 residual exactly, at the cost of a runtime divide) and splitting the residual
-per stage so it never accumulates across the whole network.
+per stage so it never accumulates across the whole network. Either would let
+depth and breadth compound rather than substitute.
 
 `benchmarks/results/cnn_depth_datapath.jsonl`. One seed; the SF8-vs-SF16
 agreement at depth 20 is the load-bearing comparison and it is a single pair.
